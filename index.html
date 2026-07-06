@@ -1325,16 +1325,17 @@ async function importOneNote(noteEl, nbName, title){
   }
 
   // --- content: ENML -> HTML -> markdown ---
-  const enml = noteEl.querySelector("content")?.textContent || "";
-  const cdoc = new DOMParser().parseFromString(enml, "text/xml");
+  // Parse as HTML (not XML): ENML uses XHTML entities like &nbsp; that break
+  // strict XML parsing. Expand self-closing custom tags first so the HTML
+  // parser doesn't swallow following content as their children.
+  let enml = noteEl.querySelector("content")?.textContent || "";
+  enml = enml.replace(/<(en-media|en-todo|en-crypt)([^>]*?)\/>/gi, "<$1$2></$1>");
+  const cdoc = new DOMParser().parseFromString(enml, "text/html");
   const enNote = cdoc.querySelector("en-note");
   const container = document.createElement("div");
   if (enNote){
-    container.innerHTML = DOMPurify.sanitize(
-      new XMLSerializer().serializeToString(enNote)
-        .replace(/^<en-note[^>]*>/i, "").replace(/<\/en-note>\s*$/i, ""),
-      { ADD_TAGS: ["en-media","en-todo","en-crypt"], ADD_ATTR: ["hash","type","checked"] }
-    );
+    container.innerHTML = DOMPurify.sanitize(enNote.innerHTML,
+      { ADD_TAGS: ["en-media","en-todo","en-crypt"], ADD_ATTR: ["hash","type","checked"] });
   }
   // en-todo -> checkbox
   container.querySelectorAll("en-todo").forEach(el => {
@@ -1361,7 +1362,12 @@ async function importOneNote(noteEl, nbName, title){
     el.replaceWith(document.createTextNode("[encrypted content not imported]"));
   });
 
-  const md = htmlToMarkdown(container.innerHTML);
+  let md = htmlToMarkdown(container.innerHTML);
+  if (!md.trim() && enml.trim()){
+    // last-resort fallback: keep the plain text so content is never lost
+    const plain = (cdoc.body || cdoc.documentElement)?.textContent || "";
+    md = plain.trim();
+  }
 
   // --- metadata ---
   const tags = [...noteEl.querySelectorAll(":scope > tag")].map(t => t.textContent.trim()).filter(Boolean);
