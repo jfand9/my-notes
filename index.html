@@ -81,6 +81,9 @@ input,select,textarea{font:inherit;}
 .nb-actions button{padding:2px 5px; border-radius:5px; font-size:12px; color:var(--muted);}
 .nb-actions button:hover{background:var(--border); color:var(--text);}
 .tag-chip{display:inline-flex;}
+.stack-head{font-weight:600;}
+.stack-head .chev{width:14px; text-align:center; color:var(--muted); flex-shrink:0; cursor:pointer;}
+.nb-in-stack{padding-left:30px;}
 #sideFooter{margin-top:auto; padding:12px; font-size:12px; color:var(--muted); border-top:1px solid var(--border);}
 #sideFooter button{color:var(--green-dark); font-weight:600;}
 #sideFooter .row{display:flex; justify-content:space-between; align-items:center; padding:3px 0;}
@@ -359,7 +362,8 @@ const state = {
   notebooks: [],            // [{name}]
   notes: [],                // [{path, name, notebook, title, tags[], updated, etag, preview}]
   bodies: {},               // path -> markdown body (without frontmatter)
-  currentNotebook: null,    // null = all
+  currentNotebook: null,    // null = all; notebook id ("Stack/Name" or "Name")
+  currentStack: null,
   currentTag: null,
   currentNote: null,        // note object
   dirty: false,
@@ -621,22 +625,45 @@ async function loadAll(showProgress=true){
     await ensureFolder(state.basePath);
     await ensureFolder(state.basePath + "/" + ATTACH_DIR);
     const rootItems = await listChildren(state.basePath);
-    const folders = rootItems.filter(i => i.folder && i.name !== ATTACH_DIR).map(i => i.name);
-    if (folders.length === 0){
-      await ensureFolder(state.basePath + "/Inbox");
-      folders.push("Inbox");
-    }
-    state.notebooks = folders.sort((a,b)=>a.localeCompare(b));
+    const rootFolders = rootItems.filter(i => i.folder && i.name !== ATTACH_DIR).map(i => i.name);
 
-    // gather note files: loose files in base + files inside each notebook folder
-    const fileEntries = [];
+    // Discover notebooks. A top-level folder that contains subfolders is a
+    // "stack" and its subfolders are notebooks; otherwise it's a plain notebook.
+    const notebooks = [];   // {id, name, stack}
+    const fileEntries = []; // {nbId, item, loose?}
     for (const f of rootItems.filter(i => i.file && /\.md$/i.test(i.name)))
-      fileEntries.push({ notebook: "Inbox", item: f, loose: true });
-    for (const nb of state.notebooks){
-      const kids = await listChildren(state.basePath + "/" + nb);
-      for (const f of kids.filter(i => i.file && /\.md$/i.test(i.name)))
-        fileEntries.push({ notebook: nb, item: f });
+      fileEntries.push({ nbId: "Inbox", item: f, loose: true });
+
+    for (const name of rootFolders){
+      const kids = await listChildren(state.basePath + "/" + name);
+      const subFolders = kids.filter(i => i.folder && i.name !== ATTACH_DIR);
+      const mdFiles = kids.filter(i => i.file && /\.md$/i.test(i.name));
+      if (subFolders.length){
+        for (const sub of subFolders){
+          const id = name + "/" + sub.name;
+          notebooks.push({ id, name: sub.name, stack: name });
+          const skids = await listChildren(state.basePath + "/" + id);
+          for (const f of skids.filter(i => i.file && /\.md$/i.test(i.name)))
+            fileEntries.push({ nbId: id, item: f });
+        }
+        if (mdFiles.length){ // loose notes directly inside a stack folder
+          notebooks.push({ id: name, name: name, stack: name });
+          for (const f of mdFiles) fileEntries.push({ nbId: name, item: f });
+        }
+      } else {
+        notebooks.push({ id: name, name, stack: null });
+        for (const f of mdFiles) fileEntries.push({ nbId: name, item: f });
+      }
     }
+    if (fileEntries.some(fe => fe.loose) && !notebooks.some(n => n.id === "Inbox"))
+      notebooks.push({ id: "Inbox", name: "Inbox", stack: null });
+    if (notebooks.length === 0){
+      await ensureFolder(state.basePath + "/Inbox");
+      notebooks.push({ id: "Inbox", name: "Inbox", stack: null });
+    }
+    notebooks.sort((a,b) =>
+      (a.stack||"").localeCompare(b.stack||"") || a.name.localeCompare(b.name));
+    state.notebooks = notebooks;
 
     // fetch bodies (cached by etag) with limited concurrency
     const notes = [];
@@ -646,7 +673,7 @@ async function loadAll(showProgress=true){
         const fe = fileEntries.shift();
         const path = fe.loose
           ? state.basePath + "/" + fe.item.name
-          : state.basePath + "/" + fe.notebook + "/" + fe.item.name;
+          : state.basePath + "/" + fe.nbId + "/" + fe.item.name;
         let raw = cacheGet(path, fe.item.eTag);
         if (raw === null){
           try { raw = await getContent(path); cacheSet(path, fe.item.eTag, raw); }
@@ -655,7 +682,7 @@ async function loadAll(showProgress=true){
         const { meta, body } = parseFrontmatter(raw);
         state.bodies[path] = body;
         notes.push({
-          path, name: fe.item.name, notebook: fe.notebook,
+          path, name: fe.item.name, notebook: fe.nbId,
           title: meta.title || fe.item.name.replace(/\.md$/i,""),
           tags: meta.tags, created: meta.created,
           updated: meta.updated || fe.item.lastModifiedDateTime,
@@ -721,7 +748,9 @@ async function saveCurrent(force=false){
 }
 
 async function createNote(notebook){
-  const nb = notebook || state.currentNotebook || state.notebooks[0] || "Inbox";
+  const nb = notebook || state.currentNotebook
+    || (state.currentStack && state.notebooks.find(x=>x.stack===state.currentStack)?.id)
+    || state.notebooks[0]?.id || "Inbox";
   await ensureFolder(state.basePath + "/" + nb);
   const name = newFilename("untitled");
   const path = state.basePath + "/" + nb + "/" + name;
@@ -852,21 +881,45 @@ function noteCounts(){
   return { byNb, byTag };
 }
 
+const collapsedStacks = () => JSON.parse(localStorage.getItem("notes.collapsedStacks")||"{}");
+
 function renderSidebar(){
   const { byNb, byTag } = noteCounts();
   $("#countAll").textContent = state.notes.length || "";
-  $("[data-view=all]").classList.toggle("active", !state.currentNotebook && !state.currentTag);
+  $("[data-view=all]").classList.toggle("active",
+    !state.currentNotebook && !state.currentTag && !state.currentStack);
 
-  $("#nbList").innerHTML = state.notebooks.map(nb => `
-    <div class="side-item ${state.currentNotebook===nb?"active":""}" data-nb="${esc(nb)}">
+  const collapsed = collapsedStacks();
+  const nbItem = nb => `
+    <div class="side-item ${nb.stack?"nb-in-stack":""} ${state.currentNotebook===nb.id?"active":""}" data-nb="${esc(nb.id)}">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(nb)}</span>
-      <span class="count">${byNb[nb]||0}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(nb.name)}</span>
+      <span class="count">${byNb[nb.id]||0}</span>
       <span class="nb-actions">
         <button data-act="rename" title="Rename">✎</button>
+        <button data-act="stack" title="Move to stack">⇅</button>
         <button data-act="delnb" title="Delete">🗑</button>
       </span>
-    </div>`).join("");
+    </div>`;
+
+  const stacks = {}, plain = [];
+  for (const nb of state.notebooks)
+    nb.stack ? (stacks[nb.stack] = stacks[nb.stack]||[]).push(nb) : plain.push(nb);
+
+  let html = "";
+  for (const s of Object.keys(stacks).sort((a,b)=>a.localeCompare(b))){
+    const total = stacks[s].reduce((sum,nb)=>sum+(byNb[nb.id]||0), 0);
+    html += `
+    <div class="side-item stack-head ${state.currentStack===s?"active":""}" data-stack="${esc(s)}">
+      <span class="chev" data-chev="${esc(s)}">${collapsed[s]?"▸":"▾"}</span>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20"/><path d="M4 16h16a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1z"/></svg>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s)}</span>
+      <span class="count">${total}</span>
+    </div>`;
+    if (!collapsed[s]) html += stacks[s].map(nbItem).join("");
+  }
+  html += plain.map(nbItem).join("");
+  $("#nbList").innerHTML = html;
 
   const tags = Object.keys(byTag).sort((a,b)=>a.localeCompare(b));
   $("#tagList").innerHTML = tags.length ? tags.map(t => `
@@ -881,6 +934,10 @@ function renderSidebar(){
 function visibleNotes(){
   let list = state.notes;
   if (state.currentNotebook) list = list.filter(n => n.notebook === state.currentNotebook);
+  if (state.currentStack){
+    const inStack = new Set(state.notebooks.filter(nb=>nb.stack===state.currentStack).map(nb=>nb.id));
+    list = list.filter(n => inStack.has(n.notebook));
+  }
   if (state.currentTag) list = list.filter(n => n.tags.includes(state.currentTag));
   const q = state.searchQ.trim().toLowerCase();
   if (q){
@@ -896,7 +953,8 @@ function visibleNotes(){
 function renderList(){
   const list = visibleNotes();
   $("#listTitle").textContent = state.currentTag ? "#"+state.currentTag
-    : (state.currentNotebook || "All Notes");
+    : state.currentStack ? "📚 " + state.currentStack
+    : (state.currentNotebook ? state.currentNotebook.split("/").pop() : "All Notes");
   $("#listSub").textContent = state.searchQ
     ? `${list.length} result${list.length===1?"":"s"} for “${state.searchQ}”`
     : `${list.length} note${list.length===1?"":"s"}`;
@@ -906,7 +964,7 @@ function renderList(){
       <div class="p">${esc(n.preview)}</div>
       <div class="meta">
         <span>${n.updated ? new Date(n.updated).toLocaleDateString() : ""}</span>
-        ${!state.currentNotebook ? `<span>${esc(n.notebook)}</span>` : ""}
+        ${!state.currentNotebook ? `<span>${esc(n.notebook.replace("/"," / "))}</span>` : ""}
         ${n.tags.slice(0,3).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}
       </div>
     </div>`).join("")
@@ -983,58 +1041,137 @@ $("#signOutBtn").onclick = () => {
 
 // sidebar nav
 $("[data-view=all]").onclick = () => {
-  state.currentNotebook = null; state.currentTag = null;
+  state.currentNotebook = null; state.currentTag = null; state.currentStack = null;
   renderSidebar(); renderList(); closeSidebar();
 };
 $("#nbList").addEventListener("click", async e => {
+  const chev = e.target.closest("[data-chev]");
+  if (chev){
+    e.stopPropagation();
+    const c = collapsedStacks();
+    c[chev.dataset.chev] = !c[chev.dataset.chev];
+    localStorage.setItem("notes.collapsedStacks", JSON.stringify(c));
+    renderSidebar();
+    return;
+  }
+  const stackHead = e.target.closest(".stack-head");
+  if (stackHead){
+    const s = stackHead.dataset.stack;
+    state.currentStack = (state.currentStack === s) ? null : s;
+    state.currentNotebook = null; state.currentTag = null;
+    renderSidebar(); renderList(); closeSidebar();
+    return;
+  }
   const item = e.target.closest(".side-item"); if (!item) return;
-  const nb = item.dataset.nb;
+  const nbId = item.dataset.nb;
+  const nbObj = state.notebooks.find(x=>x.id===nbId);
   const act = e.target.closest("[data-act]");
   if (act){
     e.stopPropagation();
     if (act.dataset.act === "rename"){
-      const name = prompt("Rename notebook:", nb);
-      if (name && name !== nb && !/[\\/:*?"<>|#%]/.test(name)){
+      const name = prompt("Rename notebook:", nbObj?.name || nbId);
+      if (name && name !== nbObj?.name && !/[\\/:*?"<>|#%]/.test(name)){
         try {
-          await moveItem(state.basePath + "/" + nb, state.basePath, name);
+          const parent = nbObj?.stack ? state.basePath + "/" + nbObj.stack : state.basePath;
+          await moveItem(state.basePath + "/" + nbId, parent, name);
           await loadAll(false);
         } catch(err){ toast("Rename failed: " + err.message); }
       }
       return;
     }
+    if (act.dataset.act === "stack"){ openStackModal(nbObj); return; }
     if (act.dataset.act === "delnb"){
-      const count = state.notes.filter(n=>n.notebook===nb).length;
-      if (!confirm(`Delete notebook "${nb}"${count?` and its ${count} note(s)`:""}? This cannot be undone.`)) return;
+      const count = state.notes.filter(n=>n.notebook===nbId).length;
+      if (!confirm(`Delete notebook "${nbObj?.name || nbId}"${count?` and its ${count} note(s)`:""}? This cannot be undone.`)) return;
       try {
-        await deleteItem(state.basePath + "/" + nb);
-        state.notes.filter(n=>n.notebook===nb).forEach(n=>localStorage.removeItem(LS.cachePrefix+n.path));
-        if (state.currentNotebook === nb) state.currentNotebook = null;
+        await deleteItem(state.basePath + "/" + nbId);
+        state.notes.filter(n=>n.notebook===nbId).forEach(n=>localStorage.removeItem(LS.cachePrefix+n.path));
+        if (state.currentNotebook === nbId) state.currentNotebook = null;
         await loadAll(false);
         toast("Notebook deleted");
       } catch(err){ toast("Delete failed: " + err.message); }
       return;
     }
   }
-  state.currentNotebook = (state.currentNotebook === nb) ? null : nb;
-  state.currentTag = null;
+  state.currentNotebook = (state.currentNotebook === nbId) ? null : nbId;
+  state.currentTag = null; state.currentStack = null;
   renderSidebar(); renderList(); closeSidebar();
 });
+
+function stackNames(){
+  return [...new Set(state.notebooks.map(nb=>nb.stack).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+}
+
+function openStackModal(nbObj){
+  if (!nbObj) return;
+  const m = modal(`
+    <h2>Move "${esc(nbObj.name)}" to stack</h2>
+    <select id="stackSel">
+      <option value="">(No stack — top level)</option>
+      ${stackNames().map(s=>`<option ${nbObj.stack===s?"selected":""}>${esc(s)}</option>`).join("")}
+      <option value="__new__">+ New stack…</option>
+    </select>
+    <input type="text" id="newStackName" class="hidden" placeholder="New stack name">
+    <div class="btnrow">
+      <button class="cancel" id="cancelBtn">Cancel</button>
+      <button class="ok" id="okBtn">Move</button>
+    </div>`);
+  const sel = m.querySelector("#stackSel"), inp = m.querySelector("#newStackName");
+  sel.onchange = () => inp.classList.toggle("hidden", sel.value !== "__new__");
+  m.querySelector("#cancelBtn").onclick = closeModal;
+  m.querySelector("#okBtn").onclick = async () => {
+    const dest = sel.value === "__new__" ? inp.value.trim() : sel.value;
+    if (sel.value === "__new__" && (!dest || /[\\/:*?"<>|#%]/.test(dest))){ toast("Enter a valid stack name"); return; }
+    closeModal();
+    if (dest === (nbObj.stack||"")) return;
+    try {
+      const destParent = dest ? state.basePath + "/" + dest : state.basePath;
+      if (dest) await ensureFolder(destParent);
+      await moveItem(state.basePath + "/" + nbObj.id, destParent);
+      await loadAll(false);
+      toast(dest ? `Moved to ${dest}` : "Moved out of stack");
+    } catch(err){ toast("Move failed: " + err.message); }
+  };
+}
 $("#tagList").addEventListener("click", e => {
   const item = e.target.closest(".side-item"); if (!item) return;
   const t = item.dataset.tag;
   state.currentTag = (state.currentTag === t) ? null : t;
   renderSidebar(); renderList(); closeSidebar();
 });
-$("#addNbBtn").onclick = async () => {
-  const name = prompt("New notebook name:");
-  if (!name) return;
-  if (/[\\/:*?"<>|#%]/.test(name)){ toast("Name contains invalid characters"); return; }
-  try {
-    await ensureFolder(state.basePath + "/" + name);
-    if (!state.notebooks.includes(name)) state.notebooks.push(name);
-    state.notebooks.sort((a,b)=>a.localeCompare(b));
-    renderSidebar();
-  } catch(e){ toast("Could not create notebook"); }
+$("#addNbBtn").onclick = () => {
+  const m = modal(`
+    <h2>New notebook</h2>
+    <input type="text" id="nbName" placeholder="Notebook name">
+    <select id="stackSel">
+      <option value="">(No stack — top level)</option>
+      ${stackNames().map(s=>`<option ${state.currentStack===s?"selected":""}>${esc(s)}</option>`).join("")}
+      <option value="__new__">+ New stack…</option>
+    </select>
+    <input type="text" id="newStackName" class="hidden" placeholder="New stack name">
+    <div class="btnrow">
+      <button class="cancel" id="cancelBtn">Cancel</button>
+      <button class="ok" id="okBtn">Create</button>
+    </div>`);
+  const sel = m.querySelector("#stackSel"), inp = m.querySelector("#newStackName");
+  sel.onchange = () => inp.classList.toggle("hidden", sel.value !== "__new__");
+  m.querySelector("#cancelBtn").onclick = closeModal;
+  m.querySelector("#nbName").focus();
+  m.querySelector("#okBtn").onclick = async () => {
+    const name = m.querySelector("#nbName").value.trim();
+    const stack = sel.value === "__new__" ? inp.value.trim() : sel.value;
+    if (!name || /[\\/:*?"<>|#%]/.test(name)){ toast("Enter a valid notebook name"); return; }
+    if (sel.value === "__new__" && (!stack || /[\\/:*?"<>|#%]/.test(stack))){ toast("Enter a valid stack name"); return; }
+    closeModal();
+    const id = stack ? stack + "/" + name : name;
+    try {
+      await ensureFolder(state.basePath + "/" + id);
+      if (!state.notebooks.some(nb=>nb.id===id))
+        state.notebooks.push({ id, name, stack: stack || null });
+      state.notebooks.sort((a,b)=>(a.stack||"").localeCompare(b.stack||"") || a.name.localeCompare(b.name));
+      renderSidebar();
+    } catch(e){ toast("Could not create notebook"); }
+  };
 };
 
 // note list
@@ -1189,7 +1326,7 @@ $("#noteMenuBtn").onclick = () => {
     <p><b>${esc(n.title||"Untitled")}</b></p>
     <label style="font-size:13px;font-weight:600;display:block;margin-top:10px">Move to notebook</label>
     <select id="mvSel">${state.notebooks.map(nb =>
-      `<option ${nb===n.notebook?"selected":""}>${esc(nb)}</option>`).join("")}</select>
+      `<option value="${esc(nb.id)}" ${nb.id===n.notebook?"selected":""}>${esc(nb.stack ? nb.stack+" / "+nb.name : nb.name)}</option>`).join("")}</select>
     <div class="btnrow">
       <button class="danger" id="delNoteBtn">Delete note</button>
       <button class="cancel" id="cancelBtn">Close</button>
