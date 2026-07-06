@@ -1,0 +1,1400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a7f5a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>My Notes</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/msal-browser/3.7.1/msal-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/turndown/7.1.2/turndown.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
+<style>
+:root{
+  --green:#1a7f5a; --green-dark:#14654a; --bg:#f7f7f5; --panel:#ffffff;
+  --border:#e2e2de; --text:#2b2b28; --muted:#8a8a84; --accent:#eaf5f0;
+  --danger:#c0392b; --radius:10px;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg); color:var(--text); overflow:hidden;
+}
+button{font:inherit; cursor:pointer; border:none; background:none; color:inherit;}
+input,select,textarea{font:inherit;}
+.hidden{display:none !important;}
+
+/* ---------- Top bar ---------- */
+#topbar{
+  height:52px; background:var(--green); color:#fff; display:flex; align-items:center;
+  gap:10px; padding:0 14px; padding-top:env(safe-area-inset-top);
+  box-sizing:content-box;
+}
+#topbar .logo{font-weight:700; font-size:17px; display:flex; align-items:center; gap:8px;}
+#topbar .logo svg{flex:0 0 auto;}
+#globalSearch{
+  flex:1; max-width:420px; margin-left:auto; padding:7px 12px; border-radius:8px;
+  border:none; background:rgba(255,255,255,.18); color:#fff; outline:none;
+}
+#globalSearch::placeholder{color:rgba(255,255,255,.75);}
+#topbar .iconbtn{padding:8px; border-radius:8px; line-height:0;}
+#topbar .iconbtn:hover{background:rgba(255,255,255,.15);}
+#syncStatus{font-size:12px; opacity:.9; white-space:nowrap;}
+
+/* ---------- Layout ---------- */
+#app{display:flex; height:calc(100% - 52px - env(safe-area-inset-top));}
+#sidebar{
+  width:230px; background:#f0f0ec; border-right:1px solid var(--border);
+  display:flex; flex-direction:column; overflow-y:auto; flex-shrink:0;
+}
+#notelist{
+  width:300px; background:var(--panel); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; flex-shrink:0;
+}
+#editorPane{flex:1; display:flex; flex-direction:column; background:var(--panel); min-width:0;}
+
+/* ---------- Sidebar ---------- */
+.side-section{padding:14px 10px 4px;}
+.side-head{
+  display:flex; align-items:center; justify-content:space-between;
+  font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+  padding:0 6px 6px;
+}
+.side-head button{color:var(--muted); font-size:16px; line-height:1; padding:0 4px; border-radius:4px;}
+.side-head button:hover{background:var(--border); color:var(--text);}
+.side-item{
+  display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px;
+  font-size:14px; cursor:pointer; user-select:none; color:var(--text);
+}
+.side-item:hover{background:#e7e7e2;}
+.side-item.active{background:var(--accent); color:var(--green-dark); font-weight:600;}
+.side-item .count{margin-left:auto; font-size:12px; color:var(--muted);}
+.side-item .nb-actions{margin-left:auto; display:none; gap:2px;}
+.side-item:hover .nb-actions{display:flex;}
+.side-item:hover .count{display:none;}
+.nb-actions button{padding:2px 5px; border-radius:5px; font-size:12px; color:var(--muted);}
+.nb-actions button:hover{background:var(--border); color:var(--text);}
+.tag-chip{display:inline-flex;}
+#sideFooter{margin-top:auto; padding:12px; font-size:12px; color:var(--muted); border-top:1px solid var(--border);}
+#sideFooter button{color:var(--green-dark); font-weight:600;}
+#sideFooter .row{display:flex; justify-content:space-between; align-items:center; padding:3px 0;}
+
+/* ---------- Note list ---------- */
+#listHeader{padding:12px 14px 8px; border-bottom:1px solid var(--border);}
+#listHeader h2{font-size:16px; display:flex; align-items:center; gap:8px;}
+#listHeader .sub{font-size:12px; color:var(--muted); margin-top:2px;}
+#newNoteBtn{
+  margin:10px 14px; padding:9px 0; background:var(--green); color:#fff; border-radius:8px;
+  font-weight:600; font-size:14px; text-align:center;
+}
+#newNoteBtn:hover{background:var(--green-dark);}
+#notes{overflow-y:auto; flex:1;}
+.note-card{padding:12px 14px; border-bottom:1px solid var(--border); cursor:pointer;}
+.note-card:hover{background:#fafaf8;}
+.note-card.active{background:var(--accent);}
+.note-card .t{font-weight:600; font-size:14px; margin-bottom:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.note-card .p{font-size:12.5px; color:var(--muted); line-height:1.4; max-height:2.8em; overflow:hidden;}
+.note-card .meta{font-size:11px; color:var(--muted); margin-top:5px; display:flex; gap:6px; flex-wrap:wrap;}
+.note-card .tag{background:#eee9dd; border-radius:4px; padding:0 5px;}
+.empty-msg{padding:30px 20px; text-align:center; color:var(--muted); font-size:14px;}
+
+/* ---------- Editor ---------- */
+#editorHeader{padding:10px 18px 0; display:flex; align-items:center; gap:8px;}
+#backBtn{display:none; padding:6px 10px; border-radius:8px; color:var(--green-dark); font-weight:600;}
+#noteTitle{
+  flex:1; border:none; outline:none; font-size:22px; font-weight:700; padding:8px 0;
+  background:transparent; min-width:0;
+}
+#noteMenuBtn{padding:6px 10px; border-radius:8px; font-size:18px; color:var(--muted);}
+#noteMenuBtn:hover{background:var(--bg);}
+#tagRow{display:flex; align-items:center; gap:6px; padding:0 18px 8px; flex-wrap:wrap;}
+#tagRow .tag{
+  background:#eee9dd; border-radius:6px; padding:2px 8px; font-size:12.5px; display:flex; align-items:center; gap:5px;
+}
+#tagRow .tag button{color:var(--muted); font-size:14px; line-height:1;}
+#tagInput{border:none; outline:none; font-size:13px; background:transparent; min-width:90px; padding:3px 0;}
+#toolbar{
+  display:flex; gap:2px; padding:6px 14px; border-top:1px solid var(--border);
+  border-bottom:1px solid var(--border); overflow-x:auto; flex-shrink:0;
+}
+#toolbar button{
+  padding:7px 10px; border-radius:7px; font-size:14px; color:#555; min-width:34px;
+}
+#toolbar button:hover{background:var(--bg);}
+#toolbar .sep{width:1px; background:var(--border); margin:4px 6px;}
+#editor{
+  flex:1; overflow-y:auto; padding:18px 22px 60px; outline:none; font-size:15.5px; line-height:1.65;
+  -webkit-user-modify:read-write;
+}
+#editor:empty::before{content:"Start writing…"; color:var(--muted);}
+#editor h1{font-size:1.6em; margin:.7em 0 .4em;}
+#editor h2{font-size:1.3em; margin:.7em 0 .4em;}
+#editor h3{font-size:1.1em; margin:.6em 0 .3em;}
+#editor p{margin:.45em 0;}
+#editor ul,#editor ol{margin:.45em 0; padding-left:1.6em;}
+#editor li{margin:.2em 0;}
+#editor input[type=checkbox]{margin-right:6px;}
+#editor blockquote{border-left:3px solid var(--green); padding-left:12px; color:#555; margin:.6em 0;}
+#editor pre{background:#f4f4f1; border:1px solid var(--border); border-radius:8px; padding:10px 12px; overflow-x:auto; font-size:13.5px;}
+#editor code{background:#f4f4f1; border-radius:4px; padding:1px 5px; font-size:.9em;}
+#editor pre code{background:none; padding:0;}
+#editor img{max-width:100%; border-radius:8px; margin:6px 0;}
+#editor a{color:var(--green-dark);}
+#editor hr{border:none; border-top:1px solid var(--border); margin:1em 0;}
+#editor table{border-collapse:collapse; margin:.6em 0;}
+#editor td,#editor th{border:1px solid var(--border); padding:5px 10px;}
+.attach-link{
+  display:inline-flex; align-items:center; gap:6px; background:#f4f4f1; border:1px solid var(--border);
+  border-radius:8px; padding:5px 10px; margin:3px 0; text-decoration:none; color:var(--text) !important; font-size:14px;
+}
+#editorEmpty{flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); flex-direction:column; gap:10px;}
+#editorEmpty svg{opacity:.35;}
+
+/* ---------- Screens (login / setup) ---------- */
+.screen{
+  position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center;
+  z-index:50; padding:20px;
+}
+.card{
+  background:#fff; border:1px solid var(--border); border-radius:16px; padding:34px 34px 28px;
+  max-width:440px; width:100%; box-shadow:0 10px 40px rgba(0,0,0,.06);
+}
+.card h1{font-size:22px; margin-bottom:6px; display:flex; align-items:center; gap:10px;}
+.card p{color:var(--muted); font-size:14px; line-height:1.55; margin-bottom:16px;}
+.card label{font-size:13px; font-weight:600; display:block; margin:14px 0 5px;}
+.card input[type=text]{
+  width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; outline:none;
+}
+.card input[type=text]:focus{border-color:var(--green);}
+.btn-primary{
+  width:100%; margin-top:18px; padding:12px; background:var(--green); color:#fff; border-radius:9px;
+  font-weight:600; font-size:15px;
+}
+.btn-primary:hover{background:var(--green-dark);}
+.card .hint{font-size:12px; color:var(--muted); margin-top:10px; line-height:1.5;}
+.card .hint a{color:var(--green-dark);}
+
+/* ---------- Modal ---------- */
+#modalWrap{position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:60; display:flex; align-items:center; justify-content:center; padding:20px;}
+#modal{background:#fff; border-radius:14px; padding:24px; max-width:460px; width:100%; max-height:85vh; overflow-y:auto;}
+#modal h2{font-size:18px; margin-bottom:12px;}
+#modal .btnrow{display:flex; gap:10px; justify-content:flex-end; margin-top:18px;}
+#modal .btnrow button{padding:9px 16px; border-radius:8px; font-weight:600;}
+#modal .btnrow .ok{background:var(--green); color:#fff;}
+#modal .btnrow .cancel{background:var(--bg);}
+#modal .btnrow .danger{background:var(--danger); color:#fff;}
+#modal input[type=text],#modal select{width:100%; padding:9px 12px; border:1px solid var(--border); border-radius:8px; margin:6px 0;}
+#modal p{font-size:14px; color:#555; line-height:1.5;}
+#modal .progress{background:var(--bg); border-radius:8px; height:10px; overflow:hidden; margin-top:12px;}
+#modal .progress>div{height:100%; background:var(--green); width:0%; transition:width .2s;}
+#modal .plog{font-size:12.5px; color:var(--muted); margin-top:8px; max-height:150px; overflow-y:auto; white-space:pre-wrap;}
+
+/* ---------- Toast ---------- */
+#toast{
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#333; color:#fff;
+  padding:10px 20px; border-radius:10px; font-size:14px; z-index:80; opacity:0; transition:opacity .25s;
+  pointer-events:none; max-width:90vw;
+}
+#toast.show{opacity:1;}
+
+/* ---------- Mobile ---------- */
+@media (max-width:900px){
+  #sidebar{position:fixed; left:0; top:0; bottom:0; z-index:40; transform:translateX(-105%); transition:transform .22s; width:270px; padding-top:calc(52px + env(safe-area-inset-top)); box-shadow:4px 0 24px rgba(0,0,0,.12);}
+  body.sidebar-open #sidebar{transform:none;}
+  #sidebarScrim{position:fixed; inset:0; z-index:35; background:rgba(0,0,0,.3);}
+  #notelist{width:100%; border-right:none;}
+  #editorPane{position:fixed; inset:0; top:calc(52px + env(safe-area-inset-top)); z-index:30; transform:translateX(103%); transition:transform .22s;}
+  body.editor-open #editorPane{transform:none;}
+  #backBtn{display:block;}
+  #globalSearch{max-width:none;}
+  #topbar .logo span{display:none;}
+}
+</style>
+</head>
+<body>
+
+<!-- ======= Top bar ======= -->
+<div id="topbar">
+  <button class="iconbtn" id="menuBtn" title="Menu">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
+  <div class="logo">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+    <span>My Notes</span>
+  </div>
+  <input id="globalSearch" type="search" placeholder="Search notes…" autocomplete="off">
+  <span id="syncStatus"></span>
+  <button class="iconbtn" id="refreshBtn" title="Refresh">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+  </button>
+</div>
+
+<!-- ======= Main layout ======= -->
+<div id="app">
+  <div id="sidebar">
+    <div class="side-section">
+      <div class="side-item" data-view="all">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+        All Notes <span class="count" id="countAll"></span>
+      </div>
+    </div>
+    <div class="side-section">
+      <div class="side-head">Notebooks <button id="addNbBtn" title="New notebook">+</button></div>
+      <div id="nbList"></div>
+    </div>
+    <div class="side-section">
+      <div class="side-head">Tags</div>
+      <div id="tagList"></div>
+    </div>
+    <div id="sideFooter">
+      <div class="row"><span id="userName"></span><button id="signOutBtn">Sign out</button></div>
+      <div class="row"><button id="importBtn">Import from Evernote</button></div>
+      <div class="row"><button id="settingsBtn">Settings</button></div>
+    </div>
+  </div>
+  <div id="sidebarScrim" class="hidden"></div>
+
+  <div id="notelist">
+    <div id="listHeader">
+      <h2 id="listTitle">All Notes</h2>
+      <div class="sub" id="listSub"></div>
+    </div>
+    <button id="newNoteBtn">+ New Note</button>
+    <div id="notes"></div>
+  </div>
+
+  <div id="editorPane">
+    <div id="editorEmpty">
+      <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      <div>Select a note or create a new one</div>
+    </div>
+    <div id="editorMain" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      <div id="editorHeader">
+        <button id="backBtn">‹ Notes</button>
+        <input id="noteTitle" placeholder="Note title" autocomplete="off">
+        <button id="noteMenuBtn" title="Note actions">⋯</button>
+      </div>
+      <div id="tagRow">
+        <span style="font-size:12px;color:var(--muted)">Tags:</span>
+        <span id="tagChips"></span>
+        <input id="tagInput" placeholder="+ add tag">
+      </div>
+      <div id="toolbar">
+        <button data-cmd="bold" title="Bold"><b>B</b></button>
+        <button data-cmd="italic" title="Italic"><i>I</i></button>
+        <button data-cmd="underline" title="Underline"><u>U</u></button>
+        <button data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+        <div class="sep"></div>
+        <button data-block="h1" title="Heading 1">H1</button>
+        <button data-block="h2" title="Heading 2">H2</button>
+        <button data-block="p" title="Paragraph">¶</button>
+        <div class="sep"></div>
+        <button data-cmd="insertUnorderedList" title="Bullet list">•≡</button>
+        <button data-cmd="insertOrderedList" title="Numbered list">1≡</button>
+        <button id="checkboxBtn" title="Checkbox">☑</button>
+        <div class="sep"></div>
+        <button data-block="blockquote" title="Quote">❝</button>
+        <button data-block="pre" title="Code block">&lt;/&gt;</button>
+        <button id="linkBtn" title="Link">🔗</button>
+        <button id="imageBtn" title="Insert image">🖼</button>
+        <button id="fileBtn" title="Attach file">📎</button>
+      </div>
+      <div id="editor" contenteditable="true" spellcheck="true"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ======= First-run / login screens ======= -->
+<div id="setupScreen" class="screen hidden">
+  <div class="card">
+    <h1>⚙️ One-time setup</h1>
+    <p>This app stores your notes as files in <b>your own OneDrive</b>. To connect it, it needs an
+    <b>Application (client) ID</b> from a free Microsoft app registration. The setup guide that came
+    with this app (<b>SETUP.md</b>) walks you through getting one in about 10 minutes.</p>
+    <label for="clientIdInput">Application (client) ID</label>
+    <input type="text" id="clientIdInput" placeholder="e.g. 1ab2c3d4-…" autocomplete="off">
+    <button class="btn-primary" id="saveClientId">Continue</button>
+    <p class="hint">The ID is saved only on this device. You'll enter it once per device.</p>
+  </div>
+</div>
+
+<div id="loginScreen" class="screen hidden">
+  <div class="card" style="text-align:center">
+    <h1 style="justify-content:center">📝 My Notes</h1>
+    <p>Your personal note-taking app. Notes are stored as portable Markdown files in your OneDrive
+    — accessible from every device, owned by you.</p>
+    <button class="btn-primary" id="signInBtn">Sign in with Microsoft</button>
+    <p class="hint" id="loginHint"></p>
+  </div>
+</div>
+
+<div id="modalWrap" class="hidden"><div id="modal"></div></div>
+<div id="toast"></div>
+<input type="file" id="enexFile" accept=".enex" multiple class="hidden">
+<input type="file" id="imgFile" accept="image/*" class="hidden">
+<input type="file" id="anyFile" class="hidden">
+
+<script>
+"use strict";
+/* ================================================================
+   CONFIG & STATE
+================================================================ */
+const LS = {
+  clientId: "notes.clientId",
+  basePath: "notes.basePath",
+  cachePrefix: "notes.cache."
+};
+const DEFAULT_BASE = "Apps/MyNotes";
+
+const state = {
+  token: null,
+  account: null,
+  basePath: localStorage.getItem(LS.basePath) || DEFAULT_BASE,
+  notebooks: [],            // [{name}]
+  notes: [],                // [{path, name, notebook, title, tags[], updated, etag, preview}]
+  bodies: {},               // path -> markdown body (without frontmatter)
+  currentNotebook: null,    // null = all
+  currentTag: null,
+  currentNote: null,        // note object
+  dirty: false,
+  saving: false,
+  searchQ: ""
+};
+
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => (s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function toast(msg, ms=2600){
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove("show"), ms);
+}
+function setSync(msg){ $("#syncStatus").textContent = msg; }
+
+/* ================================================================
+   AUTH (MSAL)
+================================================================ */
+let msalApp = null;
+const SCOPES = ["User.Read", "Files.ReadWrite"];
+
+function getClientId(){ return localStorage.getItem(LS.clientId) || ""; }
+
+function initMsal(){
+  msalApp = new msal.PublicClientApplication({
+    auth: {
+      clientId: getClientId(),
+      authority: "https://login.microsoftonline.com/consumers",
+      redirectUri: window.location.origin + window.location.pathname
+    },
+    cache: { cacheLocation: "localStorage" }
+  });
+  return msalApp.initialize();
+}
+
+async function acquireToken(interactive=false){
+  const accounts = msalApp.getAllAccounts();
+  if (accounts.length === 0){
+    if (interactive) await msalApp.loginRedirect({ scopes: SCOPES });
+    return null;
+  }
+  state.account = accounts[0];
+  try {
+    const r = await msalApp.acquireTokenSilent({ scopes: SCOPES, account: state.account });
+    state.token = r.accessToken;
+    return state.token;
+  } catch(e){
+    if (interactive) await msalApp.acquireTokenRedirect({ scopes: SCOPES, account: state.account });
+    return null;
+  }
+}
+
+async function startAuthFlow(){
+  await initMsal();
+  const resp = await msalApp.handleRedirectPromise().catch(e => {
+    $("#loginHint").textContent = "Sign-in error: " + e.message; return null;
+  });
+  if (resp && resp.account) msalApp.setActiveAccount(resp.account);
+  const tok = await acquireToken(false);
+  if (tok){ showApp(); } else { showScreen("login"); }
+}
+
+/* ================================================================
+   GRAPH HELPERS
+================================================================ */
+const GRAPH = "https://graph.microsoft.com/v1.0";
+
+async function gfetch(url, opts={}, retry=true){
+  const t = state.token || await acquireToken(false);
+  if (!t) throw new Error("Not signed in");
+  const r = await fetch(url.startsWith("http") ? url : GRAPH + url, {
+    ...opts,
+    headers: { "Authorization": "Bearer " + t, ...(opts.headers||{}) }
+  });
+  if (r.status === 401 && retry){
+    state.token = null;
+    await acquireToken(true);
+    return gfetch(url, opts, false);
+  }
+  return r;
+}
+
+function encPath(p){
+  return p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+const rootPath = p => `/me/drive/root:/${encPath(p)}`;
+
+async function ensureFolder(path){
+  // create each segment if missing
+  const parts = path.split("/").filter(Boolean);
+  let cur = "";
+  for (const part of parts){
+    const parent = cur;
+    cur = cur ? cur + "/" + part : part;
+    const check = await gfetch(rootPath(cur));
+    if (check.ok) continue;
+    const url = parent ? rootPath(parent) + ":/children" : "/me/drive/root/children";
+    const r = await gfetch(url, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ name: part, folder: {}, "@microsoft.graph.conflictBehavior": "fail" })
+    });
+    if (!r.ok && r.status !== 409) throw new Error("Could not create folder " + cur);
+  }
+}
+
+async function listChildren(path){
+  let url = rootPath(path) + ":/children?$top=200&$select=name,folder,file,eTag,lastModifiedDateTime,size,id";
+  const items = [];
+  while (url){
+    const r = await gfetch(url);
+    if (!r.ok){
+      if (r.status === 404) return [];
+      throw new Error("List failed: " + r.status);
+    }
+    const j = await r.json();
+    items.push(...j.value);
+    url = j["@odata.nextLink"] || null;
+  }
+  return items;
+}
+
+async function getContent(path){
+  const r = await gfetch(rootPath(path) + ":/content");
+  if (!r.ok) throw new Error("Read failed: " + r.status);
+  return r.text();
+}
+
+async function putContent(path, content, etag){
+  const headers = { "Content-Type": "text/plain" };
+  if (etag) headers["If-Match"] = etag;
+  const body = typeof content === "string" ? new Blob([content], {type:"text/markdown"}) : content;
+  if (body.size > 3.8*1024*1024) return putLarge(path, body);
+  const r = await gfetch(rootPath(path) + ":/content", { method:"PUT", headers, body });
+  if (r.status === 412) throw Object.assign(new Error("conflict"), {conflict:true});
+  if (!r.ok) throw new Error("Save failed: " + r.status);
+  return r.json();
+}
+
+async function putLarge(path, blob){
+  const r = await gfetch(rootPath(path) + ":/createUploadSession", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": "replace" } })
+  });
+  if (!r.ok) throw new Error("Upload session failed");
+  const { uploadUrl } = await r.json();
+  const CHUNK = 5*1024*1024;
+  let pos = 0, resp = null;
+  while (pos < blob.size){
+    const end = Math.min(pos+CHUNK, blob.size);
+    resp = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Range": `bytes ${pos}-${end-1}/${blob.size}`,
+        "Content-Length": String(end-pos)
+      },
+      body: blob.slice(pos, end)
+    });
+    if (!resp.ok && resp.status !== 202) throw new Error("Chunk upload failed");
+    pos = end;
+  }
+  return resp.json();
+}
+
+async function deleteItem(path){
+  const r = await gfetch(rootPath(path), { method:"DELETE" });
+  if (!r.ok && r.status !== 404) throw new Error("Delete failed");
+}
+
+async function moveItem(path, newParentPath, newName){
+  const r = await gfetch(rootPath(path), {
+    method: "PATCH",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({
+      parentReference: { path: "/drive/root:/" + newParentPath },
+      ...(newName ? {name: newName} : {})
+    })
+  });
+  if (!r.ok) throw new Error("Move failed");
+  return r.json();
+}
+
+async function downloadBlob(path){
+  const r = await gfetch(rootPath(path) + ":/content");
+  if (!r.ok) throw new Error("Download failed");
+  return r.blob();
+}
+
+/* ================================================================
+   NOTE DATA LAYER  (markdown files + YAML frontmatter)
+================================================================ */
+const ATTACH_DIR = "_attachments";
+
+function parseFrontmatter(raw){
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  const meta = { title:"", tags:[], created:"", updated:"" };
+  let body = raw;
+  if (m){
+    body = raw.slice(m[0].length);
+    for (const line of m[1].split(/\r?\n/)){
+      const kv = line.match(/^(\w+):\s*(.*)$/);
+      if (!kv) continue;
+      const [,k,vRaw] = kv;
+      let v = vRaw.trim();
+      if (k === "tags"){
+        try { meta.tags = JSON.parse(v).map(String).filter(Boolean); }
+        catch(e){
+          meta.tags = v.replace(/^\[|\]$/g,"").split(",")
+            .map(s=>s.trim().replace(/^["']|["']$/g,"")).filter(Boolean);
+        }
+      } else if (k in meta){
+        if (v.startsWith('"')){ try { v = JSON.parse(v); } catch(e){ v = v.replace(/^"|"$/g,""); } }
+        else v = v.replace(/^'|'$/g,"");
+        meta[k] = v;
+      }
+    }
+  }
+  return { meta, body };
+}
+
+function buildFrontmatter(meta){
+  const t = (meta.tags||[]).map(x=>JSON.stringify(x)).join(", ");
+  return `---\ntitle: ${JSON.stringify(meta.title||"Untitled")}\ntags: [${t}]\ncreated: ${meta.created||new Date().toISOString()}\nupdated: ${new Date().toISOString()}\n---\n\n`;
+}
+
+function slugify(s){
+  return (s||"untitled").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,50) || "untitled";
+}
+function newFilename(title){
+  return slugify(title) + "-" + Date.now().toString(36) + ".md";
+}
+function mkPreview(md){
+  return md.replace(/!\[[^\]]*\]\([^)]*\)/g,"")
+           .replace(/\[([^\]]*)\]\([^)]*\)/g,"$1")
+           .replace(/[#>*`_\-\|]/g," ")
+           .replace(/\s+/g," ").trim().slice(0,140);
+}
+
+// ---- cache (per-file, keyed by eTag) ----
+function cacheGet(path, etag){
+  try {
+    const raw = localStorage.getItem(LS.cachePrefix + path);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    return j.etag === etag ? j.raw : null;
+  } catch(e){ return null; }
+}
+function cacheSet(path, etag, raw){
+  try { localStorage.setItem(LS.cachePrefix + path, JSON.stringify({etag, raw})); }
+  catch(e){ /* quota — skip */ }
+}
+
+/* ---- load everything ---- */
+async function loadAll(showProgress=true){
+  setSync("Syncing…");
+  try {
+    await ensureFolder(state.basePath);
+    await ensureFolder(state.basePath + "/" + ATTACH_DIR);
+    const rootItems = await listChildren(state.basePath);
+    const folders = rootItems.filter(i => i.folder && i.name !== ATTACH_DIR).map(i => i.name);
+    if (folders.length === 0){
+      await ensureFolder(state.basePath + "/Inbox");
+      folders.push("Inbox");
+    }
+    state.notebooks = folders.sort((a,b)=>a.localeCompare(b));
+
+    // gather note files: loose files in base + files inside each notebook folder
+    const fileEntries = [];
+    for (const f of rootItems.filter(i => i.file && /\.md$/i.test(i.name)))
+      fileEntries.push({ notebook: "Inbox", item: f, loose: true });
+    for (const nb of state.notebooks){
+      const kids = await listChildren(state.basePath + "/" + nb);
+      for (const f of kids.filter(i => i.file && /\.md$/i.test(i.name)))
+        fileEntries.push({ notebook: nb, item: f });
+    }
+
+    // fetch bodies (cached by etag) with limited concurrency
+    const notes = [];
+    let done = 0;
+    const workers = Array.from({length:6}, async () => {
+      while (fileEntries.length){
+        const fe = fileEntries.shift();
+        const path = fe.loose
+          ? state.basePath + "/" + fe.item.name
+          : state.basePath + "/" + fe.notebook + "/" + fe.item.name;
+        let raw = cacheGet(path, fe.item.eTag);
+        if (raw === null){
+          try { raw = await getContent(path); cacheSet(path, fe.item.eTag, raw); }
+          catch(e){ raw = ""; }
+        }
+        const { meta, body } = parseFrontmatter(raw);
+        state.bodies[path] = body;
+        notes.push({
+          path, name: fe.item.name, notebook: fe.notebook,
+          title: meta.title || fe.item.name.replace(/\.md$/i,""),
+          tags: meta.tags, created: meta.created,
+          updated: meta.updated || fe.item.lastModifiedDateTime,
+          etag: fe.item.eTag,
+          preview: mkPreview(body)
+        });
+        done++;
+        if (showProgress && done % 10 === 0) setSync(`Loading ${done}…`);
+      }
+    });
+    await Promise.all(workers);
+    notes.sort((a,b) => (b.updated||"").localeCompare(a.updated||""));
+    state.notes = notes;
+    setSync("");
+    renderSidebar(); renderList();
+  } catch(e){
+    console.error(e);
+    setSync("");
+    toast("Sync problem: " + e.message);
+  }
+}
+
+/* ---- save current note ---- */
+let saveTimer = null;
+function scheduleSave(){
+  state.dirty = true;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveCurrent, 1800);
+  setSync("Editing…");
+}
+
+async function saveCurrent(force=false){
+  const n = state.currentNote;
+  if (!n || (!state.dirty && !force) || state.saving) return;
+  state.saving = true; setSync("Saving…");
+  try {
+    n.title = $("#noteTitle").value.trim() || "Untitled";
+    const md = htmlToMarkdown($("#editor").innerHTML);
+    state.bodies[n.path] = md;
+    n.preview = mkPreview(md);
+    n.updated = new Date().toISOString();
+    const raw = buildFrontmatter(n) + md;
+    let res;
+    try {
+      res = await putContent(n.path, raw, n.etag);
+    } catch(e){
+      if (e.conflict){
+        if (confirm("This note changed on another device. Overwrite with this version?")){
+          res = await putContent(n.path, raw, null);
+        } else { state.saving = false; setSync(""); await loadAll(false); return; }
+      } else throw e;
+    }
+    n.etag = res.eTag || n.etag;
+    cacheSet(n.path, n.etag, raw);
+    state.dirty = false;
+    setSync("Saved ✓"); setTimeout(()=>{ if(!state.dirty) setSync(""); }, 1500);
+    renderList();
+  } catch(e){
+    console.error(e); setSync(""); toast("Could not save: " + e.message);
+  } finally {
+    state.saving = false;
+  }
+}
+
+async function createNote(notebook){
+  const nb = notebook || state.currentNotebook || state.notebooks[0] || "Inbox";
+  await ensureFolder(state.basePath + "/" + nb);
+  const name = newFilename("untitled");
+  const path = state.basePath + "/" + nb + "/" + name;
+  const n = {
+    path, name, notebook: nb, title: "", tags: [],
+    created: new Date().toISOString(), updated: new Date().toISOString(),
+    etag: null, preview: ""
+  };
+  const raw = buildFrontmatter({...n, title:"Untitled"});
+  const res = await putContent(path, raw, null);
+  n.etag = res.eTag;
+  state.bodies[path] = "";
+  state.notes.unshift(n);
+  renderSidebar(); renderList();
+  openNote(n, true);
+}
+
+async function deleteNote(n){
+  await deleteItem(n.path);
+  localStorage.removeItem(LS.cachePrefix + n.path);
+  state.notes = state.notes.filter(x => x !== n);
+  delete state.bodies[n.path];
+  if (state.currentNote === n){ state.currentNote = null; showEditorEmpty(); }
+  renderSidebar(); renderList();
+  toast("Note deleted");
+}
+
+async function moveNote(n, newNb){
+  await ensureFolder(state.basePath + "/" + newNb);
+  await moveItem(n.path, state.basePath + "/" + newNb);
+  localStorage.removeItem(LS.cachePrefix + n.path);
+  const body = state.bodies[n.path];
+  delete state.bodies[n.path];
+  n.path = state.basePath + "/" + newNb + "/" + n.name;
+  n.notebook = newNb;
+  state.bodies[n.path] = body;
+  renderSidebar(); renderList();
+}
+
+/* ---- attachments ---- */
+async function uploadAttachment(file, nameHint){
+  const safe = (nameHint || file.name || "file").replace(/[\\/:*?"<>|#%]/g,"_");
+  const unique = Date.now().toString(36) + "-" + safe;
+  const path = state.basePath + "/" + ATTACH_DIR + "/" + unique;
+  await putContent(path, file, null);
+  return { path, name: safe };
+}
+
+const blobUrlCache = {};
+async function attachmentUrl(path){
+  if (blobUrlCache[path]) return blobUrlCache[path];
+  const b = await downloadBlob(path);
+  const u = URL.createObjectURL(b);
+  blobUrlCache[path] = u;
+  return u;
+}
+
+/* ================================================================
+   MARKDOWN <-> HTML
+================================================================ */
+const td = new TurndownService({ headingStyle:"atx", codeBlockStyle:"fenced", bulletListMarker:"-" });
+td.keep(["u"]);
+// task list items
+td.addRule("taskItem", {
+  filter: node => node.nodeName === "LI" && node.querySelector(':scope > input[type="checkbox"]'),
+  replacement: (content, node) => {
+    const cb = node.querySelector(':scope > input[type="checkbox"]');
+    const mark = cb && cb.checked ? "[x]" : "[ ]";
+    return `- ${mark} ${content.replace(/^\s+/,"").replace(/\n+/g," ")}\n`;
+  }
+});
+// note-internal attachments/images keep their graph path
+td.addRule("graphImg", {
+  filter: node => node.nodeName === "IMG" && node.dataset.gpath,
+  replacement: (c, node) => `![${node.alt||""}](gdrive:${node.dataset.gpath})`
+});
+td.addRule("graphLink", {
+  filter: node => node.nodeName === "A" && node.dataset.gpath,
+  replacement: (c, node) => `[${node.textContent||"attachment"}](gdrive:${node.dataset.gpath})`
+});
+
+function htmlToMarkdown(html){
+  return td.turndown(html);
+}
+
+function markdownToHtml(md){
+  // checkbox lists -> inputs
+  let html = marked.parse(md || "", { breaks: true });
+  html = DOMPurify.sanitize(html, {
+    ADD_ATTR: ["data-gpath"],
+    ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|tel:|gdrive:|data:image\/)/i
+  });
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  // convert gdrive: links/images
+  div.querySelectorAll('img[src^="gdrive:"]').forEach(img => {
+    img.dataset.gpath = img.getAttribute("src").slice(7);
+    img.removeAttribute("src");
+    img.classList.add("pending-img");
+  });
+  div.querySelectorAll('a[href^="gdrive:"]').forEach(a => {
+    a.dataset.gpath = a.getAttribute("href").slice(7);
+    a.removeAttribute("href");
+    a.classList.add("attach-link");
+    a.insertAdjacentText("afterbegin", "📎 ");
+  });
+  // markdown task lists from marked (li with disabled checkbox) -> enable
+  div.querySelectorAll('li input[type="checkbox"]').forEach(cb => cb.removeAttribute("disabled"));
+  return div.innerHTML;
+}
+
+async function hydrateAttachments(){
+  for (const img of $$("#editor img[data-gpath]")){
+    try { img.src = await attachmentUrl(img.dataset.gpath); }
+    catch(e){ img.alt = "(missing image)"; }
+  }
+}
+
+/* ================================================================
+   RENDERING
+================================================================ */
+function noteCounts(){
+  const byNb = {}, byTag = {};
+  for (const n of state.notes){
+    byNb[n.notebook] = (byNb[n.notebook]||0)+1;
+    for (const t of n.tags) byTag[t] = (byTag[t]||0)+1;
+  }
+  return { byNb, byTag };
+}
+
+function renderSidebar(){
+  const { byNb, byTag } = noteCounts();
+  $("#countAll").textContent = state.notes.length || "";
+  $("[data-view=all]").classList.toggle("active", !state.currentNotebook && !state.currentTag);
+
+  $("#nbList").innerHTML = state.notebooks.map(nb => `
+    <div class="side-item ${state.currentNotebook===nb?"active":""}" data-nb="${esc(nb)}">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(nb)}</span>
+      <span class="count">${byNb[nb]||0}</span>
+      <span class="nb-actions">
+        <button data-act="rename" title="Rename">✎</button>
+        <button data-act="delnb" title="Delete">🗑</button>
+      </span>
+    </div>`).join("");
+
+  const tags = Object.keys(byTag).sort((a,b)=>a.localeCompare(b));
+  $("#tagList").innerHTML = tags.length ? tags.map(t => `
+    <div class="side-item ${state.currentTag===t?"active":""}" data-tag="${esc(t)}">
+      <span style="color:var(--muted)">#</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t)}</span>
+      <span class="count">${byTag[t]}</span>
+    </div>`).join("")
+    : `<div style="padding:4px 10px;font-size:12.5px;color:var(--muted)">No tags yet</div>`;
+}
+
+function visibleNotes(){
+  let list = state.notes;
+  if (state.currentNotebook) list = list.filter(n => n.notebook === state.currentNotebook);
+  if (state.currentTag) list = list.filter(n => n.tags.includes(state.currentTag));
+  const q = state.searchQ.trim().toLowerCase();
+  if (q){
+    list = list.filter(n =>
+      n.title.toLowerCase().includes(q) ||
+      n.tags.some(t => t.toLowerCase().includes(q)) ||
+      (state.bodies[n.path]||"").toLowerCase().includes(q)
+    );
+  }
+  return list;
+}
+
+function renderList(){
+  const list = visibleNotes();
+  $("#listTitle").textContent = state.currentTag ? "#"+state.currentTag
+    : (state.currentNotebook || "All Notes");
+  $("#listSub").textContent = state.searchQ
+    ? `${list.length} result${list.length===1?"":"s"} for “${state.searchQ}”`
+    : `${list.length} note${list.length===1?"":"s"}`;
+  $("#notes").innerHTML = list.length ? list.map((n,i) => `
+    <div class="note-card ${state.currentNote===n?"active":""}" data-i="${state.notes.indexOf(n)}">
+      <div class="t">${esc(n.title||"Untitled")}</div>
+      <div class="p">${esc(n.preview)}</div>
+      <div class="meta">
+        <span>${n.updated ? new Date(n.updated).toLocaleDateString() : ""}</span>
+        ${!state.currentNotebook ? `<span>${esc(n.notebook)}</span>` : ""}
+        ${n.tags.slice(0,3).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}
+      </div>
+    </div>`).join("")
+    : `<div class="empty-msg">No notes here yet.<br>Tap “+ New Note” to start.</div>`;
+}
+
+/* ---- editor open/close ---- */
+function showEditorEmpty(){
+  $("#editorMain").classList.add("hidden");
+  $("#editorEmpty").classList.remove("hidden");
+  document.body.classList.remove("editor-open");
+}
+
+async function openNote(n, focusTitle=false){
+  await saveCurrent();           // flush previous
+  state.currentNote = n;
+  state.dirty = false;
+  $("#editorEmpty").classList.add("hidden");
+  $("#editorMain").classList.remove("hidden");
+  $("#noteTitle").value = n.title === "Untitled" ? "" : n.title;
+  renderTagChips();
+  $("#editor").innerHTML = markdownToHtml(state.bodies[n.path] || "");
+  hydrateAttachments();
+  renderList();
+  document.body.classList.add("editor-open");
+  if (focusTitle) $("#noteTitle").focus();
+}
+
+function renderTagChips(){
+  const n = state.currentNote; if (!n) return;
+  $("#tagChips").innerHTML = n.tags.map((t,i) =>
+    `<span class="tag">${esc(t)}<button data-rmtag="${i}" title="Remove">×</button></span>`).join("");
+}
+
+/* ================================================================
+   MODAL helper
+================================================================ */
+function modal(html){
+  $("#modal").innerHTML = html;
+  $("#modalWrap").classList.remove("hidden");
+  return $("#modal");
+}
+function closeModal(){ $("#modalWrap").classList.add("hidden"); }
+$("#modalWrap").addEventListener("click", e => { if (e.target.id === "modalWrap") closeModal(); });
+
+/* ================================================================
+   EVENT WIRING
+================================================================ */
+function showScreen(which){
+  $("#setupScreen").classList.toggle("hidden", which!=="setup");
+  $("#loginScreen").classList.toggle("hidden", which!=="login");
+}
+function showApp(){
+  showScreen("none");
+  const acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+  $("#userName").textContent = acct ? (acct.name || acct.username) : "";
+  loadAll();
+}
+
+// setup screen
+$("#saveClientId").onclick = () => {
+  const v = $("#clientIdInput").value.trim();
+  if (!/^[0-9a-f-]{30,40}$/i.test(v)){ toast("That doesn't look like a client ID"); return; }
+  localStorage.setItem(LS.clientId, v);
+  location.reload();
+};
+$("#signInBtn").onclick = async () => {
+  await msalApp.loginRedirect({ scopes: SCOPES });
+};
+$("#signOutBtn").onclick = () => {
+  const acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+  msalApp.logoutRedirect({ account: acct });
+};
+
+// sidebar nav
+$("[data-view=all]").onclick = () => {
+  state.currentNotebook = null; state.currentTag = null;
+  renderSidebar(); renderList(); closeSidebar();
+};
+$("#nbList").addEventListener("click", async e => {
+  const item = e.target.closest(".side-item"); if (!item) return;
+  const nb = item.dataset.nb;
+  const act = e.target.closest("[data-act]");
+  if (act){
+    e.stopPropagation();
+    if (act.dataset.act === "rename"){
+      const name = prompt("Rename notebook:", nb);
+      if (name && name !== nb && !/[\\/:*?"<>|#%]/.test(name)){
+        try {
+          await moveItem(state.basePath + "/" + nb, state.basePath, name);
+          await loadAll(false);
+        } catch(err){ toast("Rename failed: " + err.message); }
+      }
+      return;
+    }
+    if (act.dataset.act === "delnb"){
+      const count = state.notes.filter(n=>n.notebook===nb).length;
+      if (!confirm(`Delete notebook "${nb}"${count?` and its ${count} note(s)`:""}? This cannot be undone.`)) return;
+      try {
+        await deleteItem(state.basePath + "/" + nb);
+        state.notes.filter(n=>n.notebook===nb).forEach(n=>localStorage.removeItem(LS.cachePrefix+n.path));
+        if (state.currentNotebook === nb) state.currentNotebook = null;
+        await loadAll(false);
+        toast("Notebook deleted");
+      } catch(err){ toast("Delete failed: " + err.message); }
+      return;
+    }
+  }
+  state.currentNotebook = (state.currentNotebook === nb) ? null : nb;
+  state.currentTag = null;
+  renderSidebar(); renderList(); closeSidebar();
+});
+$("#tagList").addEventListener("click", e => {
+  const item = e.target.closest(".side-item"); if (!item) return;
+  const t = item.dataset.tag;
+  state.currentTag = (state.currentTag === t) ? null : t;
+  renderSidebar(); renderList(); closeSidebar();
+});
+$("#addNbBtn").onclick = async () => {
+  const name = prompt("New notebook name:");
+  if (!name) return;
+  if (/[\\/:*?"<>|#%]/.test(name)){ toast("Name contains invalid characters"); return; }
+  try {
+    await ensureFolder(state.basePath + "/" + name);
+    if (!state.notebooks.includes(name)) state.notebooks.push(name);
+    state.notebooks.sort((a,b)=>a.localeCompare(b));
+    renderSidebar();
+  } catch(e){ toast("Could not create notebook"); }
+};
+
+// note list
+$("#notes").addEventListener("click", e => {
+  const card = e.target.closest(".note-card"); if (!card) return;
+  openNote(state.notes[+card.dataset.i]);
+});
+$("#newNoteBtn").onclick = () => createNote().catch(e=>toast("Could not create note: "+e.message));
+$("#refreshBtn").onclick = () => loadAll();
+
+// search
+let searchTimer=null;
+$("#globalSearch").addEventListener("input", e => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(()=>{ state.searchQ = e.target.value; renderList(); }, 200);
+});
+
+// mobile nav
+function closeSidebar(){ document.body.classList.remove("sidebar-open"); $("#sidebarScrim").classList.add("hidden"); }
+$("#menuBtn").onclick = () => {
+  const open = document.body.classList.toggle("sidebar-open");
+  $("#sidebarScrim").classList.toggle("hidden", !open);
+};
+$("#sidebarScrim").onclick = closeSidebar;
+$("#backBtn").onclick = async () => { await saveCurrent(); document.body.classList.remove("editor-open"); renderList(); };
+
+// editor events
+$("#noteTitle").addEventListener("input", scheduleSave);
+$("#editor").addEventListener("input", scheduleSave);
+$("#editor").addEventListener("change", e => {  // checkbox toggles
+  if (e.target.matches('input[type="checkbox"]')) scheduleSave();
+});
+window.addEventListener("beforeunload", () => { if (state.dirty) saveCurrent(true); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && state.dirty) saveCurrent(true); });
+
+// tags
+$("#tagInput").addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === ","){
+    e.preventDefault();
+    const v = e.target.value.trim().replace(/,+$/,"");
+    if (v && state.currentNote && !state.currentNote.tags.includes(v)){
+      state.currentNote.tags.push(v);
+      renderTagChips(); renderSidebar(); scheduleSave();
+    }
+    e.target.value = "";
+  }
+});
+$("#tagChips").addEventListener("click", e => {
+  const b = e.target.closest("[data-rmtag]"); if (!b) return;
+  state.currentNote.tags.splice(+b.dataset.rmtag, 1);
+  renderTagChips(); renderSidebar(); scheduleSave();
+});
+
+// toolbar
+$$("#toolbar [data-cmd]").forEach(b => b.onclick = e => {
+  e.preventDefault();
+  $("#editor").focus();
+  document.execCommand(b.dataset.cmd, false, null);
+  scheduleSave();
+});
+$$("#toolbar [data-block]").forEach(b => b.onclick = e => {
+  e.preventDefault();
+  $("#editor").focus();
+  document.execCommand("formatBlock", false, "<" + b.dataset.block + ">");
+  scheduleSave();
+});
+$("#checkboxBtn").onclick = e => {
+  e.preventDefault();
+  $("#editor").focus();
+  document.execCommand("insertHTML", false,
+    '<ul><li><input type="checkbox"> </li></ul>');
+  scheduleSave();
+};
+$("#linkBtn").onclick = e => {
+  e.preventDefault();
+  const url = prompt("Link URL:", "https://");
+  if (url){ $("#editor").focus(); document.execCommand("createLink", false, url); scheduleSave(); }
+};
+
+// images & attachments
+$("#imageBtn").onclick = () => $("#imgFile").click();
+$("#fileBtn").onclick = () => $("#anyFile").click();
+$("#imgFile").addEventListener("change", async e => {
+  if (e.target.files[0]) await insertImage(e.target.files[0]);
+  e.target.value = "";
+});
+$("#anyFile").addEventListener("change", async e => {
+  if (e.target.files[0]) await insertFile(e.target.files[0]);
+  e.target.value = "";
+});
+$("#editor").addEventListener("paste", async e => {
+  const items = [...(e.clipboardData?.items||[])].filter(i => i.type.startsWith("image/"));
+  if (items.length){
+    e.preventDefault();
+    for (const it of items) await insertImage(it.getAsFile());
+  }
+});
+$("#editor").addEventListener("drop", async e => {
+  const files = [...(e.dataTransfer?.files||[])];
+  if (files.length){
+    e.preventDefault();
+    for (const f of files){
+      if (f.type.startsWith("image/")) await insertImage(f);
+      else await insertFile(f);
+    }
+  }
+});
+$("#editor").addEventListener("click", async e => {
+  const a = e.target.closest("a[data-gpath]");
+  if (a){
+    e.preventDefault();
+    try {
+      const url = await attachmentUrl(a.dataset.gpath);
+      const dl = document.createElement("a");
+      dl.href = url; dl.download = a.textContent.replace(/^📎\s*/,"") || "attachment";
+      dl.click();
+    } catch(err){ toast("Could not download attachment"); }
+  }
+});
+
+async function insertImage(file){
+  if (!state.currentNote){ toast("Open a note first"); return; }
+  setSync("Uploading image…");
+  try {
+    const { path } = await uploadAttachment(file);
+    const url = await attachmentUrl(path);
+    $("#editor").focus();
+    document.execCommand("insertHTML", false,
+      `<img src="${url}" data-gpath="${esc(path)}" alt="${esc(file.name||"image")}">`);
+    scheduleSave();
+  } catch(e){ toast("Image upload failed: " + e.message); }
+  setSync("");
+}
+async function insertFile(file){
+  if (!state.currentNote){ toast("Open a note first"); return; }
+  setSync("Uploading file…");
+  try {
+    const { path, name } = await uploadAttachment(file);
+    $("#editor").focus();
+    document.execCommand("insertHTML", false,
+      `&nbsp;<a class="attach-link" data-gpath="${esc(path)}">📎 ${esc(name)}</a>&nbsp;`);
+    scheduleSave();
+  } catch(e){ toast("Upload failed: " + e.message); }
+  setSync("");
+}
+
+// note actions menu
+$("#noteMenuBtn").onclick = () => {
+  const n = state.currentNote; if (!n) return;
+  const m = modal(`
+    <h2>Note actions</h2>
+    <p><b>${esc(n.title||"Untitled")}</b></p>
+    <label style="font-size:13px;font-weight:600;display:block;margin-top:10px">Move to notebook</label>
+    <select id="mvSel">${state.notebooks.map(nb =>
+      `<option ${nb===n.notebook?"selected":""}>${esc(nb)}</option>`).join("")}</select>
+    <div class="btnrow">
+      <button class="danger" id="delNoteBtn">Delete note</button>
+      <button class="cancel" id="cancelBtn">Close</button>
+      <button class="ok" id="mvBtn">Move</button>
+    </div>`);
+  m.querySelector("#cancelBtn").onclick = closeModal;
+  m.querySelector("#mvBtn").onclick = async () => {
+    const nb = m.querySelector("#mvSel").value;
+    closeModal();
+    if (nb !== n.notebook){
+      try { await moveNote(n, nb); toast("Moved to " + nb); }
+      catch(e){ toast("Move failed: " + e.message); }
+    }
+  };
+  m.querySelector("#delNoteBtn").onclick = async () => {
+    closeModal();
+    if (confirm("Delete this note permanently?")) await deleteNote(n).catch(e=>toast(e.message));
+  };
+};
+
+// settings
+$("#settingsBtn").onclick = () => {
+  const m = modal(`
+    <h2>Settings</h2>
+    <label style="font-size:13px;font-weight:600">Notes folder in OneDrive</label>
+    <input type="text" id="basePathInput" value="${esc(state.basePath)}">
+    <p style="font-size:12.5px">Path inside your OneDrive where notes are stored. Change this only if you know what you're doing — existing notes are not moved automatically.</p>
+    <div class="btnrow">
+      <button class="cancel" id="cancelBtn">Cancel</button>
+      <button class="ok" id="saveBtn">Save</button>
+    </div>`);
+  m.querySelector("#cancelBtn").onclick = closeModal;
+  m.querySelector("#saveBtn").onclick = () => {
+    const v = m.querySelector("#basePathInput").value.trim().replace(/^\/+|\/+$/g,"");
+    if (v){ localStorage.setItem(LS.basePath, v); state.basePath = v; closeModal(); loadAll(); }
+  };
+};
+
+/* ================================================================
+   EVERNOTE .ENEX IMPORT
+================================================================ */
+$("#importBtn").onclick = () => {
+  modal(`
+    <h2>Import from Evernote</h2>
+    <p>1. In Evernote, right-click a notebook → <b>Export notebook…</b> and save it as an
+    <b>.enex</b> file (choose “ENEX format”).<br><br>
+    2. Pick the file(s) below. Each file becomes a notebook here (named after the file),
+    with all notes, tags, images and attachments.</p>
+    <div class="btnrow">
+      <button class="cancel" id="cancelBtn">Cancel</button>
+      <button class="ok" id="pickBtn">Choose .enex files</button>
+    </div>`);
+  $("#cancelBtn").onclick = closeModal;
+  $("#pickBtn").onclick = () => $("#enexFile").click();
+};
+
+$("#enexFile").addEventListener("change", async e => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  if (!files.length) return;
+  const m = modal(`
+    <h2>Importing…</h2>
+    <p id="pTitle">Reading files…</p>
+    <div class="progress"><div id="pBar"></div></div>
+    <div class="plog" id="pLog"></div>
+    <div class="btnrow"><button class="cancel hidden" id="doneBtn">Done</button></div>`);
+  const log = msg => { const l = m.querySelector("#pLog"); l.textContent += msg + "\n"; l.scrollTop = l.scrollHeight; };
+  let total = 0, done = 0, failed = 0;
+
+  try {
+    const parsed = [];
+    for (const f of files){
+      const text = await f.text();
+      const doc = new DOMParser().parseFromString(text, "text/xml");
+      if (doc.querySelector("parsererror")) { log(`⚠ ${f.name}: could not parse`); continue; }
+      const notes = [...doc.querySelectorAll("note")];
+      const nbName = f.name.replace(/\.enex$/i,"").replace(/[\\/:*?"<>|#%]/g,"-") || "Imported";
+      parsed.push({ nbName, notes });
+      total += notes.length;
+    }
+    m.querySelector("#pTitle").textContent = `Importing ${total} notes…`;
+
+    for (const { nbName, notes } of parsed){
+      await ensureFolder(state.basePath + "/" + nbName);
+      log(`Notebook: ${nbName} (${notes.length} notes)`);
+      for (const noteEl of notes){
+        const title = noteEl.querySelector("title")?.textContent?.trim() || "Untitled";
+        try {
+          await importOneNote(noteEl, nbName, title);
+        } catch(err){
+          failed++; log(`  ⚠ Failed: ${title} — ${err.message}`);
+        }
+        done++;
+        m.querySelector("#pBar").style.width = Math.round(done/total*100) + "%";
+      }
+    }
+    m.querySelector("#pTitle").textContent =
+      `Imported ${done-failed} of ${total} notes${failed?` (${failed} failed)`:""}.`;
+    m.querySelector("#doneBtn").classList.remove("hidden");
+    m.querySelector("#doneBtn").onclick = () => { closeModal(); loadAll(); };
+  } catch(err){
+    m.querySelector("#pTitle").textContent = "Import error: " + err.message;
+    m.querySelector("#doneBtn").classList.remove("hidden");
+    m.querySelector("#doneBtn").onclick = closeModal;
+  }
+});
+
+function b64ToBlob(b64, mime){
+  const clean = b64.replace(/\s+/g, "");
+  const bin = atob(clean);
+  const arr = new Uint8Array(bin.length);
+  for (let i=0; i<bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return { blob: new Blob([arr], {type: mime||"application/octet-stream"}), bytes: arr };
+}
+
+async function importOneNote(noteEl, nbName, title){
+  // --- resources: hash -> uploaded path ---
+  const resources = {};
+  for (const res of noteEl.querySelectorAll("resource")){
+    const dataEl = res.querySelector("data");
+    if (!dataEl || (dataEl.getAttribute("encoding")||"base64") !== "base64") continue;
+    const mime = res.querySelector("mime")?.textContent || "application/octet-stream";
+    let fname = res.querySelector("resource-attributes > file-name")?.textContent;
+    if (!fname){
+      const ext = (mime.split("/")[1]||"bin").split(";")[0].replace("jpeg","jpg");
+      fname = "resource." + ext;
+    }
+    const { blob, bytes } = b64ToBlob(dataEl.textContent, mime);
+    // Evernote references resources by MD5 of the decoded bytes
+    const hash = SparkMD5.ArrayBuffer.hash(bytes.buffer).toLowerCase();
+    const up = await uploadAttachment(new File([blob], fname, {type:mime}), fname);
+    resources[hash] = { ...up, mime };
+  }
+
+  // --- content: ENML -> HTML -> markdown ---
+  const enml = noteEl.querySelector("content")?.textContent || "";
+  const cdoc = new DOMParser().parseFromString(enml, "text/xml");
+  const enNote = cdoc.querySelector("en-note");
+  const container = document.createElement("div");
+  if (enNote){
+    container.innerHTML = DOMPurify.sanitize(
+      new XMLSerializer().serializeToString(enNote)
+        .replace(/^<en-note[^>]*>/i, "").replace(/<\/en-note>\s*$/i, ""),
+      { ADD_TAGS: ["en-media","en-todo","en-crypt"], ADD_ATTR: ["hash","type","checked"] }
+    );
+  }
+  // en-todo -> checkbox
+  container.querySelectorAll("en-todo").forEach(el => {
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    if ((el.getAttribute("checked")||"").toLowerCase() === "true") cb.checked = true;
+    el.replaceWith(cb);
+  });
+  // en-media -> img or attachment link
+  container.querySelectorAll("en-media").forEach(el => {
+    const r = resources[(el.getAttribute("hash")||"").toLowerCase()];
+    if (!r){ el.remove(); return; }
+    if ((el.getAttribute("type")||r.mime).startsWith("image/")){
+      const img = document.createElement("img");
+      img.dataset.gpath = r.path; img.alt = r.name;
+      el.replaceWith(img);
+    } else {
+      const a = document.createElement("a");
+      a.dataset.gpath = r.path; a.textContent = r.name;
+      el.replaceWith(a);
+    }
+  });
+  container.querySelectorAll("en-crypt").forEach(el => {
+    el.replaceWith(document.createTextNode("[encrypted content not imported]"));
+  });
+
+  const md = htmlToMarkdown(container.innerHTML);
+
+  // --- metadata ---
+  const tags = [...noteEl.querySelectorAll(":scope > tag")].map(t => t.textContent.trim()).filter(Boolean);
+  const evDate = s => s && /^\d{8}T\d{6}Z$/.test(s)
+    ? `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}T${s.slice(9,11)}:${s.slice(11,13)}:${s.slice(13,15)}Z`
+    : new Date().toISOString();
+  const created = evDate(noteEl.querySelector("created")?.textContent);
+
+  const name = newFilename(title);
+  const path = state.basePath + "/" + nbName + "/" + name;
+  const raw = `---\ntitle: ${JSON.stringify(title)}\ntags: [${tags.map(t=>JSON.stringify(t)).join(", ")}]\ncreated: ${created}\nupdated: ${evDate(noteEl.querySelector("updated")?.textContent)}\n---\n\n` + md;
+  await putContent(path, raw, null);
+}
+
+/* ================================================================
+   BOOT
+================================================================ */
+(async function boot(){
+  if (typeof msal === "undefined"){
+    document.body.insertAdjacentHTML("beforeend",
+      '<div class="screen"><div class="card"><h1>⚠️ Could not load</h1><p>A required library failed to load. Check your internet connection and reload the page.</p></div></div>');
+    return;
+  }
+  if (!getClientId()){ showScreen("setup"); return; }
+  try {
+    await startAuthFlow();
+  } catch(e){
+    console.error(e);
+    showScreen("login");
+    $("#loginHint").textContent = "Could not start sign-in: " + e.message +
+      " — check that your client ID is correct (Settings on the setup screen).";
+  }
+})();
+</script>
+</body>
+</html>
