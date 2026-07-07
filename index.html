@@ -12,6 +12,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.7.1/lib/msal-browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/turndown/7.1.2/turndown.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
 <style>
@@ -136,6 +137,18 @@ input,select,textarea{font:inherit;}
   -webkit-user-modify:read-write;
 }
 #editor:empty::before{content:"Start writing…"; color:var(--muted);}
+#editor .ProseMirror{outline:none; min-height:60vh;}
+#editor .ProseMirror p.is-editor-empty:first-child::before{
+  content:attr(data-placeholder); color:var(--muted); float:left; height:0; pointer-events:none;
+}
+#editor ul[data-type="taskList"]{list-style:none; padding-left:.3em;}
+#editor ul[data-type="taskList"] li{display:flex; gap:8px; align-items:flex-start;}
+#editor ul[data-type="taskList"] li > label{margin-top:4px; flex:0 0 auto;}
+#editor ul[data-type="taskList"] li > div{flex:1; min-width:0;}
+#editor ul[data-type="taskList"] li[data-checked="true"] > div{color:var(--muted); text-decoration:line-through;}
+#editor .ProseMirror table{width:100%; table-layout:fixed;}
+#editor .ProseMirror th{background:#f4f4f1;}
+#editor .ProseMirror .selectedCell{background:var(--accent);}
 #editor h1{font-size:1.6em; margin:.7em 0 .4em;}
 #editor h2{font-size:1.3em; margin:.7em 0 .4em;}
 #editor h3{font-size:1.1em; margin:.6em 0 .3em;}
@@ -255,6 +268,12 @@ input,select,textarea{font:inherit;}
       <div class="side-head">Tags</div>
       <div id="tagList"></div>
     </div>
+    <div class="side-section">
+      <div class="side-item" data-view="trash">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Trash <span class="count" id="countTrash"></span>
+      </div>
+    </div>
     <div id="sideFooter">
       <div class="row"><span id="userName"></span><button id="signOutBtn">Sign out</button></div>
       <div class="row"><button id="importBtn">Import from Evernote</button></div>
@@ -305,10 +324,11 @@ input,select,textarea{font:inherit;}
         <button data-block="blockquote" title="Quote">❝</button>
         <button data-block="pre" title="Code block">&lt;/&gt;</button>
         <button id="linkBtn" title="Link">🔗</button>
+        <button id="tableBtn" title="Insert table">⊞</button>
         <button id="imageBtn" title="Insert image">🖼</button>
         <button id="fileBtn" title="Attach file">📎</button>
       </div>
-      <div id="editor" contenteditable="true" spellcheck="true"></div>
+      <div id="editor" spellcheck="true"></div>
     </div>
   </div>
 </div>
@@ -366,6 +386,8 @@ const state = {
   currentStack: null,
   currentTag: null,
   currentNote: null,        // note object
+  showTrash: false,
+  trash: [],                // [{path, name, notebook, title, updated}]
   dirty: false,
   saving: false,
   searchQ: ""
@@ -425,7 +447,12 @@ async function startAuthFlow(){
   });
   if (resp && resp.account) msalApp.setActiveAccount(resp.account);
   const tok = await acquireToken(false);
-  if (tok){ showApp(); } else { showScreen("login"); }
+  if (tok){ showApp(); }
+  else if (msalApp.getAllAccounts().length && localStorage.getItem("notes.index")){
+    // signed in before but can't reach Microsoft (offline) — open with cached notes
+    showApp();
+  }
+  else { showScreen("login"); }
 }
 
 /* ================================================================
@@ -558,6 +585,7 @@ async function downloadBlob(path){
    NOTE DATA LAYER  (markdown files + YAML frontmatter)
 ================================================================ */
 const ATTACH_DIR = "_attachments";
+const TRASH_DIR = "_trash";
 
 function parseFrontmatter(raw){
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
@@ -622,10 +650,11 @@ function cacheSet(path, etag, raw){
 async function loadAll(showProgress=true){
   setSync("Syncing…");
   try {
+    await flushPending();
     await ensureFolder(state.basePath);
     await ensureFolder(state.basePath + "/" + ATTACH_DIR);
     const rootItems = await listChildren(state.basePath);
-    const rootFolders = rootItems.filter(i => i.folder && i.name !== ATTACH_DIR).map(i => i.name);
+    const rootFolders = rootItems.filter(i => i.folder && i.name !== ATTACH_DIR && i.name !== TRASH_DIR).map(i => i.name);
 
     // Discover notebooks. A top-level folder that contains subfolders is a
     // "stack" and its subfolders are notebooks; otherwise it's a plain notebook.
@@ -696,14 +725,65 @@ async function loadAll(showProgress=true){
     await Promise.all(workers);
     notes.sort((a,b) => (b.updated||"").localeCompare(a.updated||""));
     state.notes = notes;
+    state.trash = await walkTrash("", 0).catch(()=>[]);
+    // persist an index so the app can open offline
+    try {
+      localStorage.setItem("notes.index", JSON.stringify(
+        { notebooks: state.notebooks, notes: state.notes, trash: state.trash }));
+    } catch(e){ /* quota */ }
     setSync("");
     renderSidebar(); renderList();
   } catch(e){
     console.error(e);
+    // offline fallback: restore last-known state from the local cache
+    const idx = localStorage.getItem("notes.index");
+    if (idx){
+      try {
+        const j = JSON.parse(idx);
+        state.notebooks = j.notebooks || [];
+        state.notes = j.notes || [];
+        state.trash = j.trash || [];
+        for (const n of state.notes){
+          const raw = cacheGet(n.path, n.etag);
+          if (raw !== null) state.bodies[n.path] = parseFrontmatter(raw).body;
+        }
+        renderSidebar(); renderList();
+        setSync("Offline");
+        toast("You're offline — showing saved notes. Edits will sync later.");
+        return;
+      } catch(e2){ /* fall through */ }
+    }
     setSync("");
     toast("Sync problem: " + e.message);
   }
 }
+
+/* ---- offline write queue ---- */
+function pendingQ(){
+  try { return JSON.parse(localStorage.getItem("notes.pending")||"[]"); } catch(e){ return []; }
+}
+function pushPending(path, raw){
+  const q = pendingQ().filter(p => p.path !== path);
+  q.push({ path, raw });
+  localStorage.setItem("notes.pending", JSON.stringify(q));
+}
+async function flushPending(){
+  const q = pendingQ();
+  if (!q.length) return;
+  setSync("Syncing offline edits…");
+  const remaining = [];
+  for (const p of q){
+    try {
+      const res = await putContent(p.path, p.raw, null);
+      const n = state.notes.find(x => x.path === p.path);
+      if (n) n.etag = res.eTag;
+      cacheSet(p.path, res.eTag, p.raw);
+    } catch(e){ remaining.push(p); }
+  }
+  localStorage.setItem("notes.pending", JSON.stringify(remaining));
+  if (!remaining.length) toast("Offline edits synced ✓");
+}
+window.addEventListener("online", () => { flushPending().catch(()=>{}); });
 
 /* ---- save current note ---- */
 let saveTimer = null;
@@ -720,7 +800,7 @@ async function saveCurrent(force=false){
   state.saving = true; setSync("Saving…");
   try {
     n.title = $("#noteTitle").value.trim() || "Untitled";
-    const md = htmlToMarkdown($("#editor").innerHTML);
+    const md = htmlToMarkdown(Ed.getHTML());
     state.bodies[n.path] = md;
     n.preview = mkPreview(md);
     n.updated = new Date().toISOString();
@@ -733,7 +813,15 @@ async function saveCurrent(force=false){
         if (confirm("This note changed on another device. Overwrite with this version?")){
           res = await putContent(n.path, raw, null);
         } else { state.saving = false; setSync(""); await loadAll(false); return; }
-      } else throw e;
+      } else {
+        // probably offline — keep the edit locally and sync later
+        pushPending(n.path, raw);
+        state.dirty = false;
+        setSync("Saved offline ⌛");
+        renderList();
+        state.saving = false;
+        return;
+      }
     }
     n.etag = res.eTag || n.etag;
     cacheSet(n.path, n.etag, raw);
@@ -760,8 +848,12 @@ async function createNote(notebook){
     etag: null, preview: ""
   };
   const raw = buildFrontmatter({...n, title:"Untitled"});
-  const res = await putContent(path, raw, null);
-  n.etag = res.eTag;
+  try {
+    const res = await putContent(path, raw, null);
+    n.etag = res.eTag;
+  } catch(e){
+    pushPending(path, raw); // offline — will sync later
+  }
   state.bodies[path] = "";
   state.notes.unshift(n);
   renderSidebar(); renderList();
@@ -769,13 +861,54 @@ async function createNote(notebook){
 }
 
 async function deleteNote(n){
-  await deleteItem(n.path);
+  const destDir = state.basePath + "/" + TRASH_DIR + "/" + n.notebook;
+  await ensureFolder(destDir);
+  await moveItem(n.path, destDir);
   localStorage.removeItem(LS.cachePrefix + n.path);
   state.notes = state.notes.filter(x => x !== n);
+  state.trash.push({ path: destDir + "/" + n.name, name: n.name, notebook: n.notebook,
+    title: n.title, updated: n.updated });
   delete state.bodies[n.path];
   if (state.currentNote === n){ state.currentNote = null; showEditorEmpty(); }
   renderSidebar(); renderList();
-  toast("Note deleted");
+  toast("Moved to Trash");
+}
+
+async function restoreTrashItem(t){
+  await ensureFolder(state.basePath + "/" + t.notebook);
+  await moveItem(t.path, state.basePath + "/" + t.notebook);
+  state.trash = state.trash.filter(x => x !== t);
+  toast("Restored");
+  await loadAll(false);
+}
+
+async function deleteTrashItemForever(t){
+  await deleteItem(t.path);
+  state.trash = state.trash.filter(x => x !== t);
+  renderSidebar(); renderList();
+  toast("Deleted forever");
+}
+
+async function emptyTrash(){
+  await deleteItem(state.basePath + "/" + TRASH_DIR);
+  state.trash = [];
+  renderSidebar(); renderList();
+  toast("Trash emptied");
+}
+
+async function walkTrash(rel, depth){
+  const base = state.basePath + "/" + TRASH_DIR + (rel ? "/" + rel : "");
+  const items = await listChildren(base);
+  const out = [];
+  for (const it of items){
+    if (it.file && /\.md$/i.test(it.name))
+      out.push({ path: base + "/" + it.name, name: it.name, notebook: rel || "Inbox",
+        title: it.name.replace(/\.md$/i,"").replace(/-[a-z0-9]+$/,"").replace(/-/g," "),
+        updated: it.lastModifiedDateTime });
+    else if (it.folder && depth < 3)
+      out.push(...await walkTrash(rel ? rel + "/" + it.name : it.name, depth + 1));
+  }
+  return out;
 }
 
 async function moveNote(n, newNb){
@@ -812,14 +945,17 @@ async function attachmentUrl(path){
    MARKDOWN <-> HTML
 ================================================================ */
 const td = new TurndownService({ headingStyle:"atx", codeBlockStyle:"fenced", bulletListMarker:"-" });
+if (window.turndownPluginGfm) td.use(window.turndownPluginGfm.tables);
 td.keep(["u"]);
-// task list items
+// task list items (both plain `li > input` and TipTap's taskItem structure)
 td.addRule("taskItem", {
-  filter: node => node.nodeName === "LI" && node.querySelector(':scope > input[type="checkbox"]'),
+  filter: node => node.nodeName === "LI" &&
+    (node.getAttribute("data-type") === "taskItem" ||
+     node.querySelector(':scope > input[type="checkbox"], :scope > label > input[type="checkbox"]')),
   replacement: (content, node) => {
-    const cb = node.querySelector(':scope > input[type="checkbox"]');
-    const mark = cb && cb.checked ? "[x]" : "[ ]";
-    return `- ${mark} ${content.replace(/^\s+/,"").replace(/\n+/g," ")}\n`;
+    const checked = node.getAttribute("data-checked") === "true" ||
+      !!node.querySelector('input[type="checkbox"]:checked');
+    return `- ${checked ? "[x]" : "[ ]"} ${content.replace(/\n+/g," ").trim()}\n`;
   }
 });
 // note-internal attachments/images keep their graph path
@@ -853,7 +989,7 @@ function markdownToHtml(md){
   });
   div.querySelectorAll('a[href^="gdrive:"]').forEach(a => {
     a.dataset.gpath = a.getAttribute("href").slice(7);
-    a.removeAttribute("href");
+    a.setAttribute("href", "#");
     a.classList.add("attach-link");
     a.insertAdjacentText("afterbegin", "📎 ");
   });
@@ -862,12 +998,91 @@ function markdownToHtml(md){
   return div.innerHTML;
 }
 
-async function hydrateAttachments(){
-  for (const img of $$("#editor img[data-gpath]")){
+// Markdown -> ready-to-edit HTML: resolve attachment images to blob URLs and,
+// for TipTap, convert plain checkbox lists into its taskList structure.
+async function prepareNoteHtml(md){
+  const div = document.createElement("div");
+  div.innerHTML = markdownToHtml(md);
+  for (const img of div.querySelectorAll("img[data-gpath]")){
     try { img.src = await attachmentUrl(img.dataset.gpath); }
     catch(e){ img.alt = "(missing image)"; }
   }
+  if (Ed.tt){
+    div.querySelectorAll('li > input[type="checkbox"], li > p > input[type="checkbox"]').forEach(cb => {
+      const li = cb.closest("li"), ul = li && li.parentElement;
+      if (!ul) return;
+      ul.setAttribute("data-type", "taskList");
+      li.setAttribute("data-type", "taskItem");
+      li.setAttribute("data-checked", cb.checked ? "true" : "false");
+      cb.remove();
+    });
+  }
+  return div.innerHTML;
 }
+
+/* ================================================================
+   EDITOR ABSTRACTION — TipTap when available, contenteditable fallback
+================================================================ */
+const ttReady = new Promise(res => {
+  window.__ttResolve = res;
+  setTimeout(() => res(window.__TT || null), 12000);
+});
+
+const Ed = {
+  tt: null, legacy: false,
+  async init(){
+    if (this.tt || this.legacy) return;
+    const TT = await ttReady;
+    if (!TT){
+      this.legacy = true;
+      $("#editor").setAttribute("contenteditable", "true");
+      return;
+    }
+    const GImage = TT.Image.extend({
+      addAttributes(){ return { ...this.parent?.(), "data-gpath": { default: null } }; }
+    });
+    const GLink = TT.Link.extend({
+      addAttributes(){ return { ...this.parent?.(), "data-gpath": { default: null }, class: { default: null } }; }
+    });
+    this.tt = new TT.Editor({
+      element: $("#editor"),
+      extensions: [
+        TT.StarterKit, TT.Underline,
+        GLink.configure({ openOnClick: false, autolink: true }),
+        GImage,
+        TT.TaskList, TT.TaskItem.configure({ nested: true }),
+        TT.Table.configure({ resizable: false }), TT.TableRow, TT.TableCell, TT.TableHeader,
+        TT.Placeholder.configure({ placeholder: "Start writing…" })
+      ],
+      editorProps: {
+        handlePaste: (view, event) => {
+          const files = [...(event.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+          if (files.length){ event.preventDefault(); files.forEach(f => insertImage(f)); return true; }
+          return false;
+        },
+        handleDrop: (view, event) => {
+          const files = [...(event.dataTransfer?.files || [])];
+          if (files.length){
+            event.preventDefault();
+            files.forEach(f => f.type.startsWith("image/") ? insertImage(f) : insertFile(f));
+            return true;
+          }
+          return false;
+        }
+      },
+      onUpdate: () => { if (state.currentNote) scheduleSave(); }
+    });
+  },
+  setHTML(html){
+    if (this.tt) this.tt.commands.setContent(html, false);
+    else $("#editor").innerHTML = html;
+  },
+  getHTML(){ return this.tt ? this.tt.getHTML() : $("#editor").innerHTML; },
+  insertHTML(html){
+    if (this.tt) this.tt.chain().focus().insertContent(html).run();
+    else { $("#editor").focus(); document.execCommand("insertHTML", false, html); }
+  }
+};
 
 /* ================================================================
    RENDERING
@@ -887,7 +1102,9 @@ function renderSidebar(){
   const { byNb, byTag } = noteCounts();
   $("#countAll").textContent = state.notes.length || "";
   $("[data-view=all]").classList.toggle("active",
-    !state.currentNotebook && !state.currentTag && !state.currentStack);
+    !state.currentNotebook && !state.currentTag && !state.currentStack && !state.showTrash);
+  $("[data-view=trash]").classList.toggle("active", state.showTrash);
+  $("#countTrash").textContent = state.trash.length || "";
 
   const collapsed = collapsedStacks();
   const nbItem = nb => `
@@ -951,6 +1168,21 @@ function visibleNotes(){
 }
 
 function renderList(){
+  if (state.showTrash){
+    $("#listTitle").textContent = "Trash";
+    $("#listSub").textContent = `${state.trash.length} item${state.trash.length===1?"":"s"} — restorable until emptied`;
+    $("#notes").innerHTML =
+      (state.trash.length ? `<div style="padding:10px 14px;border-bottom:1px solid var(--border)"><button id="emptyTrashBtn" style="color:var(--danger);font-weight:600">Empty trash…</button></div>` : "") +
+      (state.trash.map((t,i) => `
+        <div class="note-card" data-trash="${i}">
+          <div class="t">${esc(t.title || t.name)}</div>
+          <div class="meta">
+            <span>${t.updated ? new Date(t.updated).toLocaleDateString() : ""}</span>
+            <span>${esc((t.notebook||"").replace("/"," / "))}</span>
+          </div>
+        </div>`).join("") || `<div class="empty-msg">Trash is empty</div>`);
+    return;
+  }
   const list = visibleNotes();
   $("#listTitle").textContent = state.currentTag ? "#"+state.currentTag
     : state.currentStack ? "📚 " + state.currentStack
@@ -986,8 +1218,8 @@ async function openNote(n, focusTitle=false){
   $("#editorMain").classList.remove("hidden");
   $("#noteTitle").value = n.title === "Untitled" ? "" : n.title;
   renderTagChips();
-  $("#editor").innerHTML = markdownToHtml(state.bodies[n.path] || "");
-  hydrateAttachments();
+  await Ed.init();
+  Ed.setHTML(await prepareNoteHtml(state.bodies[n.path] || ""));
   renderList();
   document.body.classList.add("editor-open");
   if (focusTitle) $("#noteTitle").focus();
@@ -1021,7 +1253,40 @@ function showApp(){
   showScreen("none");
   const acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
   $("#userName").textContent = acct ? (acct.name || acct.username) : "";
-  loadAll();
+  loadAll().then(() => { handleClip().catch(e=>toast("Clip failed: "+e.message)); Ed.init(); });
+}
+
+/* ================================================================
+   WEB CLIPPER — accepts #clip= payloads (bookmarklet) and
+   ?title/&text/&url (PWA share target)
+================================================================ */
+async function handleClip(){
+  let clip = null;
+  if (location.hash.startsWith("#clip=")){
+    try {
+      clip = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(location.hash.slice(6))))));
+    } catch(e){}
+    history.replaceState(null, "", location.pathname + location.search);
+  } else {
+    const sp = new URLSearchParams(location.search);
+    if (sp.get("url") || sp.get("text") || sp.get("title")){
+      clip = { t: sp.get("title")||"", u: sp.get("url")||"", s: sp.get("text")||"" };
+      history.replaceState(null, "", location.pathname);
+    }
+  }
+  if (!clip) return;
+  const nb = "Clips";
+  await ensureFolder(state.basePath + "/" + nb);
+  const title = (clip.t || clip.u || "Clipped note").slice(0, 150);
+  const path = state.basePath + "/" + nb + "/" + newFilename(title);
+  let md = "";
+  if (clip.s) md += clip.s.split(/\n+/).map(l => "> " + l.trim()).filter(l=>l!==">").join("\n") + "\n\n";
+  if (clip.u) md += `Source: [${clip.t || clip.u}](${clip.u})\n`;
+  const now = new Date().toISOString();
+  const raw = `---\ntitle: ${JSON.stringify(title)}\ntags: ["clipped"]\ncreated: ${now}\nupdated: ${now}\n---\n\n` + md;
+  await putContent(path, raw, null);
+  toast("Clipped ✂");
+  await loadAll(false);
 }
 
 // setup screen
@@ -1041,7 +1306,7 @@ $("#signOutBtn").onclick = () => {
 
 // sidebar nav
 $("[data-view=all]").onclick = () => {
-  state.currentNotebook = null; state.currentTag = null; state.currentStack = null;
+  state.currentNotebook = null; state.currentTag = null; state.currentStack = null; state.showTrash = false;
   renderSidebar(); renderList(); closeSidebar();
 };
 $("#nbList").addEventListener("click", async e => {
@@ -1058,7 +1323,7 @@ $("#nbList").addEventListener("click", async e => {
   if (stackHead){
     const s = stackHead.dataset.stack;
     state.currentStack = (state.currentStack === s) ? null : s;
-    state.currentNotebook = null; state.currentTag = null;
+    state.currentNotebook = null; state.currentTag = null; state.showTrash = false;
     renderSidebar(); renderList(); closeSidebar();
     return;
   }
@@ -1082,19 +1347,21 @@ $("#nbList").addEventListener("click", async e => {
     if (act.dataset.act === "stack"){ openStackModal(nbObj); return; }
     if (act.dataset.act === "delnb"){
       const count = state.notes.filter(n=>n.notebook===nbId).length;
-      if (!confirm(`Delete notebook "${nbObj?.name || nbId}"${count?` and its ${count} note(s)`:""}? This cannot be undone.`)) return;
+      if (!confirm(`Move notebook "${nbObj?.name || nbId}"${count?` and its ${count} note(s)`:""} to Trash?`)) return;
       try {
-        await deleteItem(state.basePath + "/" + nbId);
+        const destDir = state.basePath + "/" + TRASH_DIR + (nbObj?.stack ? "/" + nbObj.stack : "");
+        await ensureFolder(destDir);
+        await moveItem(state.basePath + "/" + nbId, destDir);
         state.notes.filter(n=>n.notebook===nbId).forEach(n=>localStorage.removeItem(LS.cachePrefix+n.path));
         if (state.currentNotebook === nbId) state.currentNotebook = null;
         await loadAll(false);
-        toast("Notebook deleted");
+        toast("Notebook moved to Trash");
       } catch(err){ toast("Delete failed: " + err.message); }
       return;
     }
   }
   state.currentNotebook = (state.currentNotebook === nbId) ? null : nbId;
-  state.currentTag = null; state.currentStack = null;
+  state.currentTag = null; state.currentStack = null; state.showTrash = false;
   renderSidebar(); renderList(); closeSidebar();
 });
 
@@ -1137,6 +1404,7 @@ $("#tagList").addEventListener("click", e => {
   const item = e.target.closest(".side-item"); if (!item) return;
   const t = item.dataset.tag;
   state.currentTag = (state.currentTag === t) ? null : t;
+  state.showTrash = false;
   renderSidebar(); renderList(); closeSidebar();
 });
 $("#addNbBtn").onclick = () => {
@@ -1176,9 +1444,38 @@ $("#addNbBtn").onclick = () => {
 
 // note list
 $("#notes").addEventListener("click", e => {
+  if (e.target.id === "emptyTrashBtn"){
+    if (confirm(`Permanently delete all ${state.trash.length} item(s) in Trash? This cannot be undone.`))
+      emptyTrash().catch(err=>toast("Failed: "+err.message));
+    return;
+  }
   const card = e.target.closest(".note-card"); if (!card) return;
+  if (card.dataset.trash !== undefined){
+    const t = state.trash[+card.dataset.trash]; if (!t) return;
+    const m = modal(`
+      <h2>${esc(t.title || t.name)}</h2>
+      <p>In Trash — from notebook "${esc((t.notebook||"").replace("/"," / "))}".</p>
+      <div class="btnrow">
+        <button class="danger" id="delFBtn">Delete forever</button>
+        <button class="cancel" id="cancelBtn">Close</button>
+        <button class="ok" id="restBtn">Restore</button>
+      </div>`);
+    m.querySelector("#cancelBtn").onclick = closeModal;
+    m.querySelector("#restBtn").onclick = () => { closeModal(); restoreTrashItem(t).catch(err=>toast("Restore failed: "+err.message)); };
+    m.querySelector("#delFBtn").onclick = () => {
+      closeModal();
+      if (confirm("Permanently delete this note? This cannot be undone."))
+        deleteTrashItemForever(t).catch(err=>toast("Failed: "+err.message));
+    };
+    return;
+  }
   openNote(state.notes[+card.dataset.i]);
 });
+$("[data-view=trash]").onclick = () => {
+  state.showTrash = !state.showTrash;
+  state.currentNotebook = null; state.currentTag = null; state.currentStack = null;
+  renderSidebar(); renderList(); closeSidebar();
+};
 $("#newNoteBtn").onclick = () => createNote().catch(e=>toast("Could not create note: "+e.message));
 $("#refreshBtn").onclick = () => loadAll();
 
@@ -1200,9 +1497,9 @@ $("#backBtn").onclick = async () => { await saveCurrent(); document.body.classLi
 
 // editor events
 $("#noteTitle").addEventListener("input", scheduleSave);
-$("#editor").addEventListener("input", scheduleSave);
-$("#editor").addEventListener("change", e => {  // checkbox toggles
-  if (e.target.matches('input[type="checkbox"]')) scheduleSave();
+$("#editor").addEventListener("input", () => { if (!Ed.tt) scheduleSave(); });
+$("#editor").addEventListener("change", e => {  // checkbox toggles (legacy editor)
+  if (!Ed.tt && e.target.matches('input[type="checkbox"]')) scheduleSave();
 });
 window.addEventListener("beforeunload", () => { if (state.dirty) saveCurrent(true); });
 document.addEventListener("visibilitychange", () => { if (document.hidden && state.dirty) saveCurrent(true); });
@@ -1228,27 +1525,57 @@ $("#tagChips").addEventListener("click", e => {
 // toolbar
 $$("#toolbar [data-cmd]").forEach(b => b.onclick = e => {
   e.preventDefault();
-  $("#editor").focus();
-  document.execCommand(b.dataset.cmd, false, null);
+  if (Ed.tt){
+    const c = Ed.tt.chain().focus();
+    const map = {
+      bold: () => c.toggleBold(), italic: () => c.toggleItalic(),
+      underline: () => c.toggleUnderline(), strikeThrough: () => c.toggleStrike(),
+      insertUnorderedList: () => c.toggleBulletList(), insertOrderedList: () => c.toggleOrderedList()
+    };
+    map[b.dataset.cmd]?.().run();
+  } else {
+    $("#editor").focus();
+    document.execCommand(b.dataset.cmd, false, null);
+  }
   scheduleSave();
 });
 $$("#toolbar [data-block]").forEach(b => b.onclick = e => {
   e.preventDefault();
-  $("#editor").focus();
-  document.execCommand("formatBlock", false, "<" + b.dataset.block + ">");
+  if (Ed.tt){
+    const c = Ed.tt.chain().focus();
+    const map = {
+      h1: () => c.toggleHeading({level:1}), h2: () => c.toggleHeading({level:2}),
+      p: () => c.setParagraph(), blockquote: () => c.toggleBlockquote(), pre: () => c.toggleCodeBlock()
+    };
+    map[b.dataset.block]?.().run();
+  } else {
+    $("#editor").focus();
+    document.execCommand("formatBlock", false, "<" + b.dataset.block + ">");
+  }
   scheduleSave();
 });
 $("#checkboxBtn").onclick = e => {
   e.preventDefault();
-  $("#editor").focus();
-  document.execCommand("insertHTML", false,
-    '<ul><li><input type="checkbox"> </li></ul>');
+  if (Ed.tt) Ed.tt.chain().focus().toggleTaskList().run();
+  else {
+    $("#editor").focus();
+    document.execCommand("insertHTML", false, '<ul><li><input type="checkbox"> </li></ul>');
+  }
+  scheduleSave();
+};
+$("#tableBtn").onclick = e => {
+  e.preventDefault();
+  if (Ed.tt) Ed.tt.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+  else Ed.insertHTML("<table><tr><th>A</th><th>B</th></tr><tr><td></td><td></td></tr></table>");
   scheduleSave();
 };
 $("#linkBtn").onclick = e => {
   e.preventDefault();
   const url = prompt("Link URL:", "https://");
-  if (url){ $("#editor").focus(); document.execCommand("createLink", false, url); scheduleSave(); }
+  if (!url) return;
+  if (Ed.tt) Ed.tt.chain().focus().toggleLink({ href: url }).run();
+  else { $("#editor").focus(); document.execCommand("createLink", false, url); }
+  scheduleSave();
 };
 
 // images & attachments
@@ -1263,6 +1590,7 @@ $("#anyFile").addEventListener("change", async e => {
   e.target.value = "";
 });
 $("#editor").addEventListener("paste", async e => {
+  if (Ed.tt) return; // TipTap handles paste via editorProps
   const items = [...(e.clipboardData?.items||[])].filter(i => i.type.startsWith("image/"));
   if (items.length){
     e.preventDefault();
@@ -1270,6 +1598,7 @@ $("#editor").addEventListener("paste", async e => {
   }
 });
 $("#editor").addEventListener("drop", async e => {
+  if (Ed.tt) return; // TipTap handles drop via editorProps
   const files = [...(e.dataTransfer?.files||[])];
   if (files.length){
     e.preventDefault();
@@ -1298,9 +1627,7 @@ async function insertImage(file){
   try {
     const { path } = await uploadAttachment(file);
     const url = await attachmentUrl(path);
-    $("#editor").focus();
-    document.execCommand("insertHTML", false,
-      `<img src="${url}" data-gpath="${esc(path)}" alt="${esc(file.name||"image")}">`);
+    Ed.insertHTML(`<img src="${url}" data-gpath="${esc(path)}" alt="${esc(file.name||"image")}">`);
     scheduleSave();
   } catch(e){ toast("Image upload failed: " + e.message); }
   setSync("");
@@ -1310,9 +1637,7 @@ async function insertFile(file){
   setSync("Uploading file…");
   try {
     const { path, name } = await uploadAttachment(file);
-    $("#editor").focus();
-    document.execCommand("insertHTML", false,
-      `&nbsp;<a class="attach-link" data-gpath="${esc(path)}">📎 ${esc(name)}</a>&nbsp;`);
+    Ed.insertHTML(`&nbsp;<a href="#" class="attach-link" data-gpath="${esc(path)}">📎 ${esc(name)}</a>&nbsp;`);
     scheduleSave();
   } catch(e){ toast("Upload failed: " + e.message); }
   setSync("");
@@ -1328,7 +1653,7 @@ $("#noteMenuBtn").onclick = () => {
     <select id="mvSel">${state.notebooks.map(nb =>
       `<option value="${esc(nb.id)}" ${nb.id===n.notebook?"selected":""}>${esc(nb.stack ? nb.stack+" / "+nb.name : nb.name)}</option>`).join("")}</select>
     <div class="btnrow">
-      <button class="danger" id="delNoteBtn">Delete note</button>
+      <button class="danger" id="delNoteBtn">Move to Trash</button>
       <button class="cancel" id="cancelBtn">Close</button>
       <button class="ok" id="mvBtn">Move</button>
     </div>`);
@@ -1343,7 +1668,7 @@ $("#noteMenuBtn").onclick = () => {
   };
   m.querySelector("#delNoteBtn").onclick = async () => {
     closeModal();
-    if (confirm("Delete this note permanently?")) await deleteNote(n).catch(e=>toast(e.message));
+    await deleteNote(n).catch(e=>toast(e.message));
   };
 };
 
@@ -1354,6 +1679,10 @@ $("#settingsBtn").onclick = () => {
     <label style="font-size:13px;font-weight:600">Notes folder in OneDrive</label>
     <input type="text" id="basePathInput" value="${esc(state.basePath)}">
     <p style="font-size:12.5px">Path inside your OneDrive where notes are stored. Change this only if you know what you're doing — existing notes are not moved automatically.</p>
+    <label style="font-size:13px;font-weight:600;margin-top:14px;display:block">Web clipper</label>
+    <p style="font-size:12.5px">Drag this link to your bookmarks bar. Then on any web page, select text and click it — the page title, link, and selection are saved to a "Clips" notebook here:</p>
+    <p style="margin:8px 0"><a id="clipBm" href="${esc(`javascript:(function(){var d={t:document.title,u:location.href,s:String(getSelection()).slice(0,4000)};window.open('${location.origin+location.pathname}#clip='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(d))))),'_blank');})()`)}" style="display:inline-block;background:var(--accent);color:var(--green-dark);font-weight:600;padding:7px 14px;border-radius:8px;text-decoration:none">✂ Clip to My Notes</a></p>
+    <p style="font-size:12.5px">On your phone (Android): install the app to your home screen, then use the system Share menu on any page and pick "Notes".</p>
     <div class="btnrow">
       <button class="cancel" id="cancelBtn">Cancel</button>
       <button class="ok" id="saveBtn">Save</button>
@@ -1523,6 +1852,9 @@ async function importOneNote(noteEl, nbName, title){
    BOOT
 ================================================================ */
 (async function boot(){
+  if ("serviceWorker" in navigator){
+    navigator.serviceWorker.register("sw.js").catch(()=>{});
+  }
   if (typeof msal === "undefined"){
     document.body.insertAdjacentHTML("beforeend",
       '<div class="screen"><div class="card"><h1>⚠️ Could not load</h1><p>A required library failed to load. Check your internet connection and reload the page.</p></div></div>');
@@ -1537,6 +1869,31 @@ async function importOneNote(noteEl, nbName, title){
     $("#loginHint").textContent = "Could not start sign-in: " + e.message +
       " — check that your client ID is correct (Settings on the setup screen).";
   }
+})();
+</script>
+<script type="module">
+/* TipTap rich editor — loaded as ES modules; app falls back to the basic
+   editor automatically if this fails (offline first run, CDN issue, etc.) */
+(async () => {
+  try {
+    const v = "2.6.6";
+    const mods = await Promise.all([
+      "core","starter-kit","extension-underline","extension-link","extension-image",
+      "extension-task-list","extension-task-item","extension-table","extension-table-row",
+      "extension-table-cell","extension-table-header","extension-placeholder"
+    ].map(p => import(`https://esm.sh/@tiptap/${p}@${v}`)));
+    window.__TT = {
+      Editor: mods[0].Editor,
+      StarterKit: mods[1].default, Underline: mods[2].default, Link: mods[3].default,
+      Image: mods[4].default, TaskList: mods[5].default, TaskItem: mods[6].default,
+      Table: mods[7].default, TableRow: mods[8].default, TableCell: mods[9].default,
+      TableHeader: mods[10].default, Placeholder: mods[11].default
+    };
+  } catch(e){
+    console.warn("Rich editor unavailable, using basic editor:", e);
+    window.__TT = null;
+  }
+  window.__ttResolve && window.__ttResolve(window.__TT);
 })();
 </script>
 </body>
