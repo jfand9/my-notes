@@ -528,6 +528,7 @@ async function putContent(path, content, etag){
   if (body.size > 3.8*1024*1024) return putLarge(path, body);
   const r = await gfetch(rootPath(path) + ":/content", { method:"PUT", headers, body });
   if (r.status === 412) throw Object.assign(new Error("conflict"), {conflict:true});
+  if (r.status === 507) throw new Error("Your OneDrive is full. Free up space (try Settings → Clean up storage, or empty the Trash), then try again.");
   if (!r.ok) throw new Error("Save failed: " + r.status);
   return r.json();
 }
@@ -1702,6 +1703,69 @@ $("#noteMenuBtn").onclick = () => {
   };
 };
 
+// storage cleanup — delete attachments that no note references anymore
+function fmtBytes(b){
+  return b > 1048576 ? (b/1048576).toFixed(1) + " MB" : Math.round(b/1024) + " KB";
+}
+async function findOrphanAttachments(onProgress){
+  const referenced = new Set();
+  const rx = /\(gdrive:([^)]+)\)/g;
+  for (const p in state.bodies){
+    let m; const b = state.bodies[p] || "";
+    while ((m = rx.exec(b))) referenced.add(m[1]);
+  }
+  // include notes sitting in Trash so restoring them keeps their images
+  let done = 0;
+  for (const t of state.trash){
+    try {
+      const raw = await getContent(t.path);
+      let m; while ((m = rx.exec(raw))) referenced.add(m[1]);
+    } catch(e){}
+    onProgress && onProgress(`Scanning trash ${++done}/${state.trash.length}…`);
+  }
+  const items = await listChildren(state.basePath + "/" + ATTACH_DIR);
+  const orphans = items.filter(i => i.file &&
+    !referenced.has(state.basePath + "/" + ATTACH_DIR + "/" + i.name));
+  const bytes = orphans.reduce((s,i) => s + (i.size||0), 0);
+  return { orphans, bytes };
+}
+
+async function runStorageCleanup(){
+  const m = modal(`
+    <h2>Clean up storage</h2>
+    <p id="cuMsg">Scanning attachments…</p>
+    <div class="btnrow">
+      <button class="cancel" id="cancelBtn">Close</button>
+      <button class="danger hidden" id="cuGoBtn">Delete unused</button>
+    </div>`);
+  m.querySelector("#cancelBtn").onclick = closeModal;
+  try {
+    const { orphans, bytes } = await findOrphanAttachments(
+      msg => { m.querySelector("#cuMsg").textContent = msg; });
+    if (!orphans.length){
+      m.querySelector("#cuMsg").textContent = "No unused attachments found. To free more space, empty the Trash or check what else is using your OneDrive at onedrive.com.";
+      return;
+    }
+    m.querySelector("#cuMsg").textContent =
+      `Found ${orphans.length} attachment file(s) no note uses — ${fmtBytes(bytes)} reclaimable. These are usually left over from deleted notes or re-imports. Delete them permanently?`;
+    const go = m.querySelector("#cuGoBtn");
+    go.classList.remove("hidden");
+    go.onclick = async () => {
+      go.disabled = true;
+      let n = 0;
+      for (const it of orphans){
+        try { await deleteItem(state.basePath + "/" + ATTACH_DIR + "/" + it.name); n++; }
+        catch(e){}
+        m.querySelector("#cuMsg").textContent = `Deleting ${n}/${orphans.length}…`;
+      }
+      m.querySelector("#cuMsg").textContent = `Done — deleted ${n} file(s), freed about ${fmtBytes(bytes)}.`;
+      go.classList.add("hidden");
+    };
+  } catch(e){
+    m.querySelector("#cuMsg").textContent = "Cleanup failed: " + e.message;
+  }
+}
+
 // settings
 $("#settingsBtn").onclick = () => {
   const m = modal(`
@@ -1713,11 +1777,15 @@ $("#settingsBtn").onclick = () => {
     <p style="font-size:12.5px">Drag this link to your bookmarks bar. Then on any web page, select text and click it — the page title, link, and selection are saved to a "Clips" notebook here:</p>
     <p style="margin:8px 0"><a id="clipBm" href="${esc(`javascript:(function(){var d={t:document.title,u:location.href,s:String(getSelection()).slice(0,4000)};window.open('${location.origin+location.pathname}#clip='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(d))))),'_blank');})()`)}" style="display:inline-block;background:var(--accent);color:var(--green-dark);font-weight:600;padding:7px 14px;border-radius:8px;text-decoration:none">✂ Clip to My Notes</a></p>
     <p style="font-size:12.5px">On your phone (Android): install the app to your home screen, then use the system Share menu on any page and pick "Notes".</p>
+    <label style="font-size:13px;font-weight:600;margin-top:14px;display:block">Storage</label>
+    <p style="margin:8px 0"><button id="cleanupBtn" style="background:var(--accent);color:var(--green-dark);font-weight:600;padding:7px 14px;border-radius:8px">🧹 Clean up unused attachments</button></p>
+    <p style="font-size:12.5px">Finds and removes attachment files that no note references (left over from deleted notes or re-imports). Also: emptying the Trash frees space.</p>
     <div class="btnrow">
       <button class="cancel" id="cancelBtn">Cancel</button>
       <button class="ok" id="saveBtn">Save</button>
     </div>`);
   m.querySelector("#cancelBtn").onclick = closeModal;
+  m.querySelector("#cleanupBtn").onclick = () => { closeModal(); runStorageCleanup(); };
   m.querySelector("#saveBtn").onclick = () => {
     const v = m.querySelector("#basePathInput").value.trim().replace(/^\/+|\/+$/g,"");
     if (v){ localStorage.setItem(LS.basePath, v); state.basePath = v; closeModal(); loadAll(); }
