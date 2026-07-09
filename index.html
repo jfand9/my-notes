@@ -533,6 +533,14 @@ async function putContent(path, content, etag){
 }
 
 async function putLarge(path, blob){
+  try {
+    return await putLargeInner(path, blob);
+  } catch(e){
+    throw new Error("This file is over Microsoft's 4 MB browser-upload limit for personal OneDrive accounts. Images are compressed automatically — for other files, please keep them under 4 MB.");
+  }
+}
+
+async function putLargeInner(path, blob){
   const r = await gfetch(rootPath(path) + ":/createUploadSession", {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": "replace" } })
@@ -924,7 +932,29 @@ async function moveNote(n, newNb){
 }
 
 /* ---- attachments ---- */
+// Shrink big images before upload. Personal OneDrive accounts can't accept
+// browser uploads over ~4 MB (Microsoft CORS limitation on upload sessions),
+// and huge screenshots make notes slow anyway.
+async function compressImage(file){
+  if (!file.type?.startsWith("image/") || file.type === "image/gif" || file.type === "image/svg+xml") return file;
+  if (file.size < 900*1024) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const MAX = 2200;
+    const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.88));
+    if (blob && blob.size < file.size)
+      return new File([blob], (file.name || "image").replace(/\.\w+$/,"") + ".jpg", { type: "image/jpeg" });
+  } catch(e){ /* fall through to original */ }
+  return file;
+}
+
 async function uploadAttachment(file, nameHint){
+  if (file.type?.startsWith("image/")) file = await compressImage(file);
   const safe = (nameHint || file.name || "file").replace(/[\\/:*?"<>|#%]/g,"_");
   const unique = Date.now().toString(36) + "-" + safe;
   const path = state.basePath + "/" + ATTACH_DIR + "/" + unique;
