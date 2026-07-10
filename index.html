@@ -86,6 +86,10 @@ input,select,textarea{font:inherit;}
 .stack-head .chev{width:14px; text-align:center; color:var(--muted); flex-shrink:0; cursor:pointer;}
 .nb-in-stack{padding-left:30px;}
 #sideFooter{margin-top:auto; padding:12px; font-size:12px; color:var(--muted); border-top:1px solid var(--border);}
+#quotaWrap{margin-bottom:10px;}
+#quotaBar{height:6px; background:var(--border); border-radius:4px; overflow:hidden;}
+#quotaBar>div{height:100%; background:var(--green); width:0; transition:width .3s;}
+#quotaText{font-size:11.5px; color:var(--muted); margin-top:4px;}
 #sideFooter button{color:var(--green-dark); font-weight:600;}
 #sideFooter .row{display:flex; justify-content:space-between; align-items:center; padding:3px 0;}
 
@@ -265,7 +269,9 @@ input,select,textarea{font:inherit;}
       <div id="nbList"></div>
     </div>
     <div class="side-section">
-      <div class="side-head">Tags</div>
+      <div class="side-head" id="tagsHead" style="cursor:pointer;user-select:none">
+        <span>Tags</span><button id="tagsChev" title="Collapse">▾</button>
+      </div>
       <div id="tagList"></div>
     </div>
     <div class="side-section">
@@ -275,6 +281,10 @@ input,select,textarea{font:inherit;}
       </div>
     </div>
     <div id="sideFooter">
+      <div id="quotaWrap" class="hidden" title="OneDrive storage">
+        <div id="quotaBar"><div></div></div>
+        <div id="quotaText"></div>
+      </div>
       <div class="row"><span id="userName"></span><button id="signOutBtn">Sign out</button></div>
       <div class="row"><button id="importBtn">Import from Evernote</button></div>
       <div class="row"><button id="settingsBtn">Settings</button></div>
@@ -742,6 +752,7 @@ async function loadAll(showProgress=true){
     } catch(e){ /* quota */ }
     setSync("");
     renderSidebar(); renderList();
+    updateQuota();
   } catch(e){
     console.error(e);
     // offline fallback: restore last-known state from the local cache
@@ -903,6 +914,7 @@ async function emptyTrash(){
   state.trash = [];
   renderSidebar(); renderList();
   toast("Trash emptied");
+  updateQuota();
 }
 
 async function walkTrash(rel, depth){
@@ -1169,6 +1181,9 @@ function renderSidebar(){
   html += plain.map(nbItem).join("");
   $("#nbList").innerHTML = html;
 
+  const tagsCollapsed = localStorage.getItem("notes.tagsCollapsed") === "1";
+  $("#tagsChev").textContent = tagsCollapsed ? "▸" : "▾";
+  $("#tagList").classList.toggle("hidden", tagsCollapsed);
   const tags = Object.keys(byTag).sort((a,b)=>a.localeCompare(b));
   $("#tagList").innerHTML = tags.length ? tags.map(t => `
     <div class="side-item ${state.currentTag===t?"active":""}" data-tag="${esc(t)}">
@@ -1431,6 +1446,11 @@ function openStackModal(nbObj){
     } catch(err){ toast("Move failed: " + err.message); }
   };
 }
+$("#tagsHead").addEventListener("click", () => {
+  const c = localStorage.getItem("notes.tagsCollapsed") === "1";
+  localStorage.setItem("notes.tagsCollapsed", c ? "0" : "1");
+  renderSidebar();
+});
 $("#tagList").addEventListener("click", e => {
   const item = e.target.closest(".side-item"); if (!item) return;
   const t = item.dataset.tag;
@@ -1703,6 +1723,27 @@ $("#noteMenuBtn").onclick = () => {
   };
 };
 
+// OneDrive storage meter
+function fmtGB(b){
+  return b >= 1073741824 ? (b/1073741824).toFixed(1) + " GB" : Math.round(b/1048576) + " MB";
+}
+async function updateQuota(){
+  try {
+    const r = await gfetch("/me/drive?$select=quota");
+    if (!r.ok) return;
+    const q = (await r.json()).quota || {};
+    if (!q.total) return;
+    const used = q.used || 0;
+    const free = q.remaining ?? (q.total - used);
+    const pct = Math.min(100, Math.round(used / q.total * 100));
+    const bar = $("#quotaBar>div");
+    bar.style.width = pct + "%";
+    bar.style.background = pct >= 92 ? "var(--danger)" : pct >= 75 ? "#d68910" : "var(--green)";
+    $("#quotaText").textContent = `OneDrive: ${fmtGB(free)} free of ${fmtGB(q.total)}`;
+    $("#quotaWrap").classList.remove("hidden");
+  } catch(e){ /* offline etc — keep last shown value */ }
+}
+
 // storage cleanup — delete attachments that no note references anymore
 function fmtBytes(b){
   return b > 1048576 ? (b/1048576).toFixed(1) + " MB" : Math.round(b/1024) + " KB";
@@ -1760,6 +1801,7 @@ async function runStorageCleanup(){
       }
       m.querySelector("#cuMsg").textContent = `Done — deleted ${n} file(s), freed about ${fmtBytes(bytes)}.`;
       go.classList.add("hidden");
+      updateQuota();
     };
   } catch(e){
     m.querySelector("#cuMsg").textContent = "Cleanup failed: " + e.message;
