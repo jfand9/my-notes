@@ -698,43 +698,74 @@ function openDeltaDB(){
   if (_idbPromise) return _idbPromise;
   _idbPromise = new Promise((resolve, reject) => {
     if (!window.indexedDB){ reject(new Error("no indexedDB")); return; }
-    const req = indexedDB.open("notesDeltaDB", 1);
-    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains("kv")) req.result.createObjectStore("kv"); };
+    const req = indexedDB.open("notesDeltaDB", 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+      // "bodies" holds the full cached note content, keyed by file path —
+      // moved out of localStorage (see bodyCacheGet/bodyCacheSet below).
+      if (!db.objectStoreNames.contains("bodies")) db.createObjectStore("bodies");
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
   return _idbPromise;
 }
-async function idbGet(key){
+async function idbGet(key, store="kv"){
   try {
     const db = await openDeltaDB();
     return await new Promise((resolve, reject) => {
-      const rq = db.transaction("kv","readonly").objectStore("kv").get(key);
+      const rq = db.transaction(store,"readonly").objectStore(store).get(key);
       rq.onsuccess = () => resolve(rq.result);
       rq.onerror = () => reject(rq.error);
     });
   } catch(e){ return undefined; }
 }
-async function idbSet(key, value){
+async function idbSet(key, value, store="kv"){
   try {
     const db = await openDeltaDB();
     await new Promise((resolve, reject) => {
-      const tx = db.transaction("kv","readwrite");
-      tx.objectStore("kv").put(value, key);
+      const tx = db.transaction(store,"readwrite");
+      tx.objectStore(store).put(value, key);
       tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
     });
     return true;
   } catch(e){ return false; }
 }
-async function idbDel(key){
+async function idbDel(key, store="kv"){
   try {
     const db = await openDeltaDB();
     await new Promise((resolve, reject) => {
-      const tx = db.transaction("kv","readwrite");
-      tx.objectStore("kv").delete(key);
+      const tx = db.transaction(store,"readwrite");
+      tx.objectStore(store).delete(key);
       tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
     });
   } catch(e){ /* ignore */ }
+}
+
+// ---- note-body cache (IndexedDB "bodies" store, keyed by path) ----
+// Was localStorage — but localStorage has a hard ~5MB per-origin cap, and
+// on a library this size that cap was already exceeded, so cacheSet() was
+// silently failing for most notes (only ~500/1323 ever actually cached).
+// That forced a real Graph network fetch for ~800 notes on *every* sync,
+// which was the real reason syncs still took ~70-90s even after the delta
+// fix. IndexedDB has a far larger quota, so every note's body can be
+// cached, and repeat syncs become near-instant. Falls back to reading (and
+// then clearing) any leftover localStorage entry from before this change.
+async function bodyCacheGet(path, etag){
+  const hit = await idbGet(path, "bodies");
+  if (hit && hit.etag === etag) return hit.raw;
+  const legacy = cacheGet(path, etag);
+  if (legacy !== null){
+    idbSet(path, {etag, raw: legacy}, "bodies").catch(()=>{});
+    try { localStorage.removeItem(LS.cachePrefix + path); } catch(e){}
+    return legacy;
+  }
+  return null;
+}
+async function bodyCacheSet(path, etag, raw){
+  await idbSet(path, {etag, raw}, "bodies");
+  try { localStorage.removeItem(LS.cachePrefix + path); } catch(e){ /* ignore */ }
 }
 
 async function loadDeltaItems(){
@@ -889,9 +920,9 @@ async function fetchNoteBodiesFromEntries(fileEntries, showProgress){
   const workers = Array.from({length:6}, async () => {
     while (queue.length){
       const fe = queue.shift();
-      let raw = cacheGet(fe.path, fe.eTag);
+      let raw = await bodyCacheGet(fe.path, fe.eTag);
       if (raw === null){
-        try { raw = await getContent(fe.path); cacheSet(fe.path, fe.eTag, raw); }
+        try { raw = await getContent(fe.path); await bodyCacheSet(fe.path, fe.eTag, raw); }
         catch(e){ raw = ""; }
       }
       const { meta, body } = parseFrontmatter(raw);
@@ -989,9 +1020,9 @@ async function loadAllFullScan(showProgress=true){
         const path = fe.loose
           ? state.basePath + "/" + fe.item.name
           : state.basePath + "/" + fe.nbId + "/" + fe.item.name;
-        let raw = cacheGet(path, fe.item.eTag);
+        let raw = await bodyCacheGet(path, fe.item.eTag);
         if (raw === null){
-          try { raw = await getContent(path); cacheSet(path, fe.item.eTag, raw); }
+          try { raw = await getContent(path); await bodyCacheSet(path, fe.item.eTag, raw); }
           catch(e){ raw = ""; }
         }
         const { meta, body } = parseFrontmatter(raw);
@@ -1031,7 +1062,7 @@ async function loadAllFullScan(showProgress=true){
         state.notes = j.notes || [];
         state.trash = j.trash || [];
         for (const n of state.notes){
-          const raw = cacheGet(n.path, n.etag);
+          const raw = await bodyCacheGet(n.path, n.etag);
           if (raw !== null) state.bodies[n.path] = parseFrontmatter(raw).body;
         }
         renderSidebar(); renderList();
@@ -1064,7 +1095,7 @@ async function flushPending(){
       const res = await putContent(p.path, p.raw, null);
       const n = state.notes.find(x => x.path === p.path);
       if (n) n.etag = res.eTag;
-      cacheSet(p.path, res.eTag, p.raw);
+      await bodyCacheSet(p.path, res.eTag, p.raw);
     } catch(e){ remaining.push(p); }
   }
   localStorage.setItem("notes.pending", JSON.stringify(remaining));
@@ -1111,7 +1142,7 @@ async function saveCurrent(force=false){
       }
     }
     n.etag = res.eTag || n.etag;
-    cacheSet(n.path, n.etag, raw);
+    await bodyCacheSet(n.path, n.etag, raw);
     state.dirty = false;
     setSync("Saved ✓"); setTimeout(()=>{ if(!state.dirty) setSync(""); }, 1500);
     renderList();
