@@ -684,26 +684,71 @@ function cacheSet(path, etag, raw){
    automatically to the older folder-by-folder scan (loadAllFullScan)
    if anything about delta goes wrong.
 ================================================================ */
+// Delta bookkeeping (the item map + continuation link) lives in IndexedDB,
+// not localStorage. A library this size makes a map of every file/folder
+// under basePath — potentially a few MB — and localStorage is already
+// mostly consumed by cached note bodies (usually a hard ~5MB per-origin
+// cap). IndexedDB has a much larger quota and won't compete for that space.
 function deltaKeySuffix(){ return state.basePath.replace(/[^a-zA-Z0-9]+/g, "_"); }
-function deltaLinkKey(){ return "notes.delta.link." + deltaKeySuffix(); }
-function deltaItemsKey(){ return "notes.delta.items." + deltaKeySuffix(); }
+function deltaLinkKey(){ return "link." + deltaKeySuffix(); }
+function deltaItemsKey(){ return "items." + deltaKeySuffix(); }
 
-function loadDeltaItems(){
-  try { return JSON.parse(localStorage.getItem(deltaItemsKey()) || "{}"); }
-  catch(e){ return {}; }
+let _idbPromise = null;
+function openDeltaDB(){
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB){ reject(new Error("no indexedDB")); return; }
+    const req = indexedDB.open("notesDeltaDB", 1);
+    req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains("kv")) req.result.createObjectStore("kv"); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _idbPromise;
 }
-function saveDeltaState(map, link){
+async function idbGet(key){
   try {
-    localStorage.setItem(deltaItemsKey(), JSON.stringify(map));
-    if (link) localStorage.setItem(deltaLinkKey(), link);
-  } catch(e){
-    // storage pressure — drop bookkeeping so next sync does a clean full resync
-    clearDeltaState();
-  }
+    const db = await openDeltaDB();
+    return await new Promise((resolve, reject) => {
+      const rq = db.transaction("kv","readonly").objectStore("kv").get(key);
+      rq.onsuccess = () => resolve(rq.result);
+      rq.onerror = () => reject(rq.error);
+    });
+  } catch(e){ return undefined; }
 }
-function clearDeltaState(){
-  localStorage.removeItem(deltaItemsKey());
-  localStorage.removeItem(deltaLinkKey());
+async function idbSet(key, value){
+  try {
+    const db = await openDeltaDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("kv","readwrite");
+      tx.objectStore("kv").put(value, key);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch(e){ return false; }
+}
+async function idbDel(key){
+  try {
+    const db = await openDeltaDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("kv","readwrite");
+      tx.objectStore("kv").delete(key);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  } catch(e){ /* ignore */ }
+}
+
+async function loadDeltaItems(){
+  const v = await idbGet(deltaItemsKey());
+  return (v && typeof v === "object") ? v : {};
+}
+async function saveDeltaState(map, link){
+  const ok = await idbSet(deltaItemsKey(), map);
+  if (ok && link) await idbSet(deltaLinkKey(), link);
+  if (!ok) await clearDeltaState(); // couldn't persist — force a clean resync next time
+}
+async function clearDeltaState(){
+  await idbDel(deltaItemsKey());
+  await idbDel(deltaLinkKey());
 }
 
 // Path of an item relative to state.basePath (posix, decoded). Returns ""
@@ -724,8 +769,8 @@ function itemTail(item){
 const DELTA_SELECT = "id,name,file,folder,eTag,lastModifiedDateTime,size,parentReference,deleted";
 
 async function deltaSync(showProgress){
-  let map = loadDeltaItems();
-  let link = localStorage.getItem(deltaLinkKey());
+  let map = await loadDeltaItems();
+  let link = await idbGet(deltaLinkKey());
   const freshBaseline = !link;
   if (freshBaseline){
     await ensureFolder(state.basePath);
@@ -739,7 +784,7 @@ async function deltaSync(showProgress){
     if (r.status === 410 || r.status === 404){
       // Graph says our delta token is stale (410) or the folder moved/was
       // recreated (404) — reset and restart from a fresh baseline.
-      clearDeltaState(); map = {};
+      await clearDeltaState(); map = {};
       if (r.status === 404){
         await ensureFolder(state.basePath);
         await ensureFolder(state.basePath + "/" + ATTACH_DIR);
@@ -765,7 +810,7 @@ async function deltaSync(showProgress){
     link = j["@odata.deltaLink"] || link;
     url = null;
   }
-  saveDeltaState(map, link);
+  await saveDeltaState(map, link);
 
   const { notebooks, fileEntries, trash } = buildTreeFromDeltaMap(map);
   if (notebooks.length === 0){
@@ -883,7 +928,7 @@ async function loadAll(showProgress=true){
     updateQuota();
   } catch(e){
     console.warn("Delta sync unavailable, falling back to full scan:", e);
-    clearDeltaState();
+    await clearDeltaState();
     await loadAllFullScan(showProgress);
   }
 }
