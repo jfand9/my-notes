@@ -675,8 +675,220 @@ function cacheSet(path, etag, raw){
   catch(e){ /* quota — skip */ }
 }
 
+/* ================================================================
+   DELTA SYNC — Microsoft Graph delta API
+   First run walks the whole tree (paginated, still far fewer requests
+   than one listChildren() per folder). Every run after that asks Graph
+   "what changed since last time" and gets back a tiny diff, so refreshing
+   a library with hundreds of notes becomes near-instant. Falls back
+   automatically to the older folder-by-folder scan (loadAllFullScan)
+   if anything about delta goes wrong.
+================================================================ */
+function deltaKeySuffix(){ return state.basePath.replace(/[^a-zA-Z0-9]+/g, "_"); }
+function deltaLinkKey(){ return "notes.delta.link." + deltaKeySuffix(); }
+function deltaItemsKey(){ return "notes.delta.items." + deltaKeySuffix(); }
+
+function loadDeltaItems(){
+  try { return JSON.parse(localStorage.getItem(deltaItemsKey()) || "{}"); }
+  catch(e){ return {}; }
+}
+function saveDeltaState(map, link){
+  try {
+    localStorage.setItem(deltaItemsKey(), JSON.stringify(map));
+    if (link) localStorage.setItem(deltaLinkKey(), link);
+  } catch(e){
+    // storage pressure — drop bookkeeping so next sync does a clean full resync
+    clearDeltaState();
+  }
+}
+function clearDeltaState(){
+  localStorage.removeItem(deltaItemsKey());
+  localStorage.removeItem(deltaLinkKey());
+}
+
+// Path of an item relative to state.basePath (posix, decoded). Returns ""
+// for the base folder itself, or null if the item is outside our tree.
+function itemTail(item){
+  const raw = (item.parentReference && item.parentReference.path) || "";
+  let decoded; try { decoded = decodeURIComponent(raw); } catch(e){ decoded = raw; }
+  const marker = "/drive/root:";
+  let p = decoded.startsWith(marker) ? decoded.slice(marker.length) : decoded;
+  p = p.replace(/^\/+/, "");
+  const full = p ? p + "/" + item.name : item.name;
+  const bp = state.basePath.replace(/^\/+|\/+$/g, "");
+  if (full === bp) return "";
+  if (full.startsWith(bp + "/")) return full.slice(bp.length + 1);
+  return null;
+}
+
+const DELTA_SELECT = "id,name,file,folder,eTag,lastModifiedDateTime,size,parentReference,deleted";
+
+async function deltaSync(showProgress){
+  let map = loadDeltaItems();
+  let link = localStorage.getItem(deltaLinkKey());
+  const freshBaseline = !link;
+  if (freshBaseline){
+    await ensureFolder(state.basePath);
+    await ensureFolder(state.basePath + "/" + ATTACH_DIR);
+  }
+  const baseUrl = () => rootPath(state.basePath) + ":/delta?$select=" + DELTA_SELECT;
+  let url = link || baseUrl();
+  let pages = 0;
+  while (url){
+    const r = await gfetch(url);
+    if (r.status === 410 || r.status === 404){
+      // Graph says our delta token is stale (410) or the folder moved/was
+      // recreated (404) — reset and restart from a fresh baseline.
+      clearDeltaState(); map = {};
+      if (r.status === 404){
+        await ensureFolder(state.basePath);
+        await ensureFolder(state.basePath + "/" + ATTACH_DIR);
+      }
+      const j = r.status === 410 ? await r.json().catch(()=>({})) : {};
+      url = j["@odata.deltaLink"] || baseUrl();
+      continue;
+    }
+    if (!r.ok) throw new Error("Delta failed: " + r.status);
+    const j = await r.json();
+    for (const item of (j.value || [])){
+      if (item.deleted){ delete map[item.id]; continue; }
+      const tail = itemTail(item);
+      if (tail === null) continue;
+      map[item.id] = {
+        tail, isFolder: !!item.folder, name: item.name,
+        eTag: item.eTag, mtime: item.lastModifiedDateTime, size: item.size
+      };
+    }
+    pages++;
+    if (showProgress && pages > 1) setSync(`Syncing… (page ${pages})`);
+    if (j["@odata.nextLink"]){ url = j["@odata.nextLink"]; continue; }
+    link = j["@odata.deltaLink"] || link;
+    url = null;
+  }
+  saveDeltaState(map, link);
+
+  const { notebooks, fileEntries, trash } = buildTreeFromDeltaMap(map);
+  if (notebooks.length === 0){
+    await ensureFolder(state.basePath + "/Inbox");
+    notebooks.push({ id: "Inbox", name: "Inbox", stack: null });
+  }
+  state.notebooks = notebooks;
+  state.notes = await fetchNoteBodiesFromEntries(fileEntries, showProgress);
+  state.trash = trash;
+}
+
+function buildTreeFromDeltaMap(map){
+  const entries = Object.values(map).filter(e => e.tail !== "");
+  const notebooks = [];    // {id, name, stack}
+  const fileEntries = [];  // {nbId, name, path, eTag, mtime}
+  const trash = [];
+
+  const topLevel = entries.filter(e => !e.tail.includes("/"));
+  const topFolders = topLevel.filter(e => e.isFolder && e.tail !== ATTACH_DIR && e.tail !== TRASH_DIR);
+  const looseRootMd = topLevel.filter(e => !e.isFolder && /\.md$/i.test(e.name));
+
+  for (const f of looseRootMd)
+    fileEntries.push({ nbId: "Inbox", name: f.name, path: state.basePath + "/" + f.tail, eTag: f.eTag, mtime: f.mtime });
+
+  for (const tf of topFolders){
+    const prefix = tf.tail + "/";
+    const children = entries.filter(e => e.tail.startsWith(prefix) && !e.tail.slice(prefix.length).includes("/"));
+    const subFolders = children.filter(e => e.isFolder && e.name !== ATTACH_DIR && e.name !== TRASH_DIR);
+    const mdFiles = children.filter(e => !e.isFolder && /\.md$/i.test(e.name));
+    if (subFolders.length){
+      for (const sub of subFolders){
+        const id = tf.name + "/" + sub.name;
+        notebooks.push({ id, name: sub.name, stack: tf.name });
+        const subPrefix = sub.tail + "/";
+        const subFiles = entries.filter(e =>
+          e.tail.startsWith(subPrefix) && !e.tail.slice(subPrefix.length).includes("/") &&
+          !e.isFolder && /\.md$/i.test(e.name));
+        for (const f of subFiles)
+          fileEntries.push({ nbId: id, name: f.name, path: state.basePath + "/" + f.tail, eTag: f.eTag, mtime: f.mtime });
+      }
+      if (mdFiles.length){
+        notebooks.push({ id: tf.name, name: tf.name, stack: tf.name });
+        for (const f of mdFiles)
+          fileEntries.push({ nbId: tf.name, name: f.name, path: state.basePath + "/" + f.tail, eTag: f.eTag, mtime: f.mtime });
+      }
+    } else {
+      notebooks.push({ id: tf.name, name: tf.name, stack: null });
+      for (const f of mdFiles)
+        fileEntries.push({ nbId: tf.name, name: f.name, path: state.basePath + "/" + f.tail, eTag: f.eTag, mtime: f.mtime });
+    }
+  }
+  if (fileEntries.some(fe => fe.nbId === "Inbox") && !notebooks.some(n => n.id === "Inbox"))
+    notebooks.push({ id: "Inbox", name: "Inbox", stack: null });
+  notebooks.sort((a,b) => (a.stack||"").localeCompare(b.stack||"") || a.name.localeCompare(b.name));
+
+  const trashPrefix = TRASH_DIR + "/";
+  for (const e of entries){
+    if (e.isFolder || !e.tail.startsWith(trashPrefix) || !/\.md$/i.test(e.name)) continue;
+    const rel = e.tail.slice(trashPrefix.length);
+    const parts = rel.split("/");
+    const notebook = parts.length > 1 ? parts.slice(0,-1).join("/") : "Inbox";
+    trash.push({
+      path: state.basePath + "/" + e.tail, name: e.name, notebook,
+      title: e.name.replace(/\.md$/i,"").replace(/-[a-z0-9]+$/,"").replace(/-/g," "),
+      updated: e.mtime
+    });
+  }
+
+  return { notebooks, fileEntries, trash };
+}
+
+async function fetchNoteBodiesFromEntries(fileEntries, showProgress){
+  const notes = [];
+  let done = 0;
+  const queue = fileEntries.slice();
+  const workers = Array.from({length:6}, async () => {
+    while (queue.length){
+      const fe = queue.shift();
+      let raw = cacheGet(fe.path, fe.eTag);
+      if (raw === null){
+        try { raw = await getContent(fe.path); cacheSet(fe.path, fe.eTag, raw); }
+        catch(e){ raw = ""; }
+      }
+      const { meta, body } = parseFrontmatter(raw);
+      state.bodies[fe.path] = body;
+      notes.push({
+        path: fe.path, name: fe.name, notebook: fe.nbId,
+        title: meta.title || fe.name.replace(/\.md$/i,""),
+        tags: meta.tags, created: meta.created,
+        updated: meta.updated || fe.mtime,
+        etag: fe.eTag,
+        preview: mkPreview(body)
+      });
+      done++;
+      if (showProgress && done % 10 === 0) setSync(`Loading ${done}…`);
+    }
+  });
+  await Promise.all(workers);
+  notes.sort((a,b) => (b.updated||"").localeCompare(a.updated||""));
+  return notes;
+}
+
 /* ---- load everything ---- */
 async function loadAll(showProgress=true){
+  setSync("Syncing…");
+  try {
+    await flushPending();
+    await deltaSync(showProgress);
+    try {
+      localStorage.setItem("notes.index", JSON.stringify(
+        { notebooks: state.notebooks, notes: state.notes, trash: state.trash }));
+    } catch(e){ /* quota */ }
+    setSync("");
+    renderSidebar(); renderList();
+    updateQuota();
+  } catch(e){
+    console.warn("Delta sync unavailable, falling back to full scan:", e);
+    clearDeltaState();
+    await loadAllFullScan(showProgress);
+  }
+}
+
+async function loadAllFullScan(showProgress=true){
   setSync("Syncing…");
   try {
     await flushPending();
