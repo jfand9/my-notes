@@ -121,6 +121,9 @@ input,select,textarea{font:inherit;}
 }
 #noteMenuBtn{padding:6px 10px; border-radius:8px; font-size:18px; color:var(--muted);}
 #noteMenuBtn:hover{background:var(--bg);}
+#pinBtn{padding:6px 8px; border-radius:8px; font-size:16px; opacity:.35; filter:grayscale(1);}
+#pinBtn:hover{background:var(--bg);}
+#pinBtn.on{opacity:1; filter:none;}
 #tagRow{display:flex; align-items:center; gap:6px; padding:0 18px 8px; flex-wrap:wrap;}
 #tagRow .tag{
   background:#eee9dd; border-radius:6px; padding:2px 8px; font-size:12.5px; display:flex; align-items:center; gap:5px;
@@ -310,6 +313,7 @@ input,select,textarea{font:inherit;}
       <div id="editorHeader">
         <button id="backBtn">‹ Notes</button>
         <input id="noteTitle" placeholder="Note title" autocomplete="off">
+        <button id="pinBtn" title="Pin to top">📌</button>
         <button id="noteMenuBtn" title="Note actions">⋯</button>
       </div>
       <div id="tagRow">
@@ -618,7 +622,7 @@ const TRASH_DIR = "_trash";
 
 function parseFrontmatter(raw){
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  const meta = { title:"", tags:[], created:"", updated:"" };
+  const meta = { title:"", tags:[], created:"", updated:"", pinned:false };
   let body = raw;
   if (m){
     body = raw.slice(m[0].length);
@@ -633,6 +637,8 @@ function parseFrontmatter(raw){
           meta.tags = v.replace(/^\[|\]$/g,"").split(",")
             .map(s=>s.trim().replace(/^["']|["']$/g,"")).filter(Boolean);
         }
+      } else if (k === "pinned"){
+        meta.pinned = v === "true";
       } else if (k in meta){
         if (v.startsWith('"')){ try { v = JSON.parse(v); } catch(e){ v = v.replace(/^"|"$/g,""); } }
         else v = v.replace(/^'|'$/g,"");
@@ -645,7 +651,7 @@ function parseFrontmatter(raw){
 
 function buildFrontmatter(meta){
   const t = (meta.tags||[]).map(x=>JSON.stringify(x)).join(", ");
-  return `---\ntitle: ${JSON.stringify(meta.title||"Untitled")}\ntags: [${t}]\ncreated: ${meta.created||new Date().toISOString()}\nupdated: ${new Date().toISOString()}\n---\n\n`;
+  return `---\ntitle: ${JSON.stringify(meta.title||"Untitled")}\ntags: [${t}]\n${meta.pinned ? "pinned: true\n" : ""}created: ${meta.created||new Date().toISOString()}\nupdated: ${new Date().toISOString()}\n---\n\n`;
 }
 
 function slugify(s){
@@ -930,7 +936,7 @@ async function fetchNoteBodiesFromEntries(fileEntries, showProgress){
       notes.push({
         path: fe.path, name: fe.name, notebook: fe.nbId,
         title: meta.title || fe.name.replace(/\.md$/i,""),
-        tags: meta.tags, created: meta.created,
+        tags: meta.tags, created: meta.created, pinned: !!meta.pinned,
         updated: meta.updated || fe.mtime,
         etag: fe.eTag,
         preview: mkPreview(body)
@@ -1030,7 +1036,7 @@ async function loadAllFullScan(showProgress=true){
         notes.push({
           path, name: fe.item.name, notebook: fe.nbId,
           title: meta.title || fe.item.name.replace(/\.md$/i,""),
-          tags: meta.tags, created: meta.created,
+          tags: meta.tags, created: meta.created, pinned: !!meta.pinned,
           updated: meta.updated || fe.item.lastModifiedDateTime,
           etag: fe.item.eTag,
           preview: mkPreview(body)
@@ -1508,7 +1514,8 @@ function visibleNotes(){
       (state.bodies[n.path]||"").toLowerCase().includes(q)
     );
   }
-  return list;
+  // pinned notes float to the top (rest keep their newest-first order)
+  return [...list.filter(n => n.pinned), ...list.filter(n => !n.pinned)];
 }
 
 function renderList(){
@@ -1536,7 +1543,7 @@ function renderList(){
     : `${list.length} note${list.length===1?"":"s"}`;
   $("#notes").innerHTML = list.length ? list.map((n,i) => `
     <div class="note-card ${state.currentNote===n?"active":""}" data-i="${state.notes.indexOf(n)}">
-      <div class="t">${esc(n.title||"Untitled")}</div>
+      <div class="t">${n.pinned ? "📌 " : ""}${esc(n.title||"Untitled")}</div>
       <div class="p">${esc(n.preview)}</div>
       <div class="meta">
         <span>${n.updated ? new Date(n.updated).toLocaleDateString() : ""}</span>
@@ -1547,11 +1554,40 @@ function renderList(){
     : `<div class="empty-msg">No notes here yet.<br>Tap “+ New Note” to start.</div>`;
 }
 
+/* ---- back-button navigation (phone) ----
+   Each screen layer (note editor, sidebar drawer, modal) pushes a history
+   entry when it opens, so the device Back button / swipe closes the top
+   layer instead of leaving the app. Only on narrow (phone) layouts. */
+const isMobile = () => window.matchMedia("(max-width:900px)").matches;
+const Nav = {
+  skip: 0,
+  push(kind){ if (isMobile()) history.pushState({nav:kind}, ""); },
+  // UI was already closed by code — drop its history entry without re-closing
+  back(kind){
+    if (history.state && history.state.nav === kind){ Nav.skip++; history.back(); }
+  }
+};
+function hideSidebar(){ document.body.classList.remove("sidebar-open"); $("#sidebarScrim").classList.add("hidden"); }
+async function closeEditorPane(){
+  await saveCurrent();
+  document.body.classList.remove("editor-open");
+  renderList();
+}
+window.addEventListener("popstate", () => {
+  if (Nav.skip > 0){ Nav.skip--; return; }
+  if (!$("#modalWrap").classList.contains("hidden")){ $("#modalWrap").classList.add("hidden"); return; }
+  if (document.body.classList.contains("sidebar-open")){ hideSidebar(); return; }
+  if (document.body.classList.contains("editor-open")) closeEditorPane();
+});
+
 /* ---- editor open/close ---- */
 function showEditorEmpty(){
   $("#editorMain").classList.add("hidden");
   $("#editorEmpty").classList.remove("hidden");
-  document.body.classList.remove("editor-open");
+  if (document.body.classList.contains("editor-open")){
+    document.body.classList.remove("editor-open");
+    Nav.back("editor");
+  }
 }
 
 async function openNote(n, focusTitle=false){
@@ -1564,7 +1600,9 @@ async function openNote(n, focusTitle=false){
   renderTagChips();
   await Ed.init();
   Ed.setHTML(await prepareNoteHtml(state.bodies[n.path] || ""));
+  $("#pinBtn").classList.toggle("on", !!n.pinned);
   renderList();
+  if (!document.body.classList.contains("editor-open")) Nav.push("editor");
   document.body.classList.add("editor-open");
   if (focusTitle) $("#noteTitle").focus();
 }
@@ -1580,10 +1618,15 @@ function renderTagChips(){
 ================================================================ */
 function modal(html){
   $("#modal").innerHTML = html;
+  if ($("#modalWrap").classList.contains("hidden")) Nav.push("modal");
   $("#modalWrap").classList.remove("hidden");
   return $("#modal");
 }
-function closeModal(){ $("#modalWrap").classList.add("hidden"); }
+function closeModal(){
+  if ($("#modalWrap").classList.contains("hidden")) return;
+  $("#modalWrap").classList.add("hidden");
+  Nav.back("modal");
+}
 $("#modalWrap").addEventListener("click", e => { if (e.target.id === "modalWrap") closeModal(); });
 
 /* ================================================================
@@ -1836,13 +1879,31 @@ $("#globalSearch").addEventListener("input", e => {
 });
 
 // mobile nav
-function closeSidebar(){ document.body.classList.remove("sidebar-open"); $("#sidebarScrim").classList.add("hidden"); }
+function closeSidebar(){
+  if (!document.body.classList.contains("sidebar-open")) return;
+  hideSidebar(); Nav.back("sidebar");
+}
 $("#menuBtn").onclick = () => {
-  const open = document.body.classList.toggle("sidebar-open");
-  $("#sidebarScrim").classList.toggle("hidden", !open);
+  if (document.body.classList.contains("sidebar-open")){ closeSidebar(); return; }
+  Nav.push("sidebar");
+  document.body.classList.add("sidebar-open");
+  $("#sidebarScrim").classList.remove("hidden");
 };
 $("#sidebarScrim").onclick = closeSidebar;
-$("#backBtn").onclick = async () => { await saveCurrent(); document.body.classList.remove("editor-open"); renderList(); };
+$("#backBtn").onclick = async () => {
+  await closeEditorPane();
+  Nav.back("editor");
+};
+
+// pin / unpin the open note
+$("#pinBtn").onclick = async () => {
+  const n = state.currentNote; if (!n) return;
+  n.pinned = !n.pinned;
+  $("#pinBtn").classList.toggle("on", n.pinned);
+  toast(n.pinned ? "Pinned to top 📌" : "Unpinned");
+  await saveCurrent(true);
+  renderList();
+};
 
 // editor events
 $("#noteTitle").addEventListener("input", scheduleSave);
