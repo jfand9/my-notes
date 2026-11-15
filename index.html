@@ -102,6 +102,11 @@ input,select,textarea{font:inherit;}
   font-weight:600; font-size:14px; text-align:center;
 }
 #newNoteBtn:hover{background:var(--green-dark);}
+#ocrNoteBtn{
+  margin:0 14px 10px; padding:8px 0; background:transparent; color:var(--green-dark);
+  border:1px solid var(--green); border-radius:8px; font-weight:600; font-size:13px; text-align:center;
+}
+#ocrNoteBtn:hover{background:var(--accent);}
 #notes{overflow-y:auto; flex:1;}
 .note-card{padding:12px 14px; border-bottom:1px solid var(--border); cursor:pointer;}
 .note-card:hover{background:#fafaf8;}
@@ -301,6 +306,7 @@ input,select,textarea{font:inherit;}
       <div class="sub" id="listSub"></div>
     </div>
     <button id="newNoteBtn">+ New Note</button>
+    <button id="ocrNoteBtn">📷 Note from image</button>
     <div id="notes"></div>
   </div>
 
@@ -339,7 +345,8 @@ input,select,textarea{font:inherit;}
         <button data-block="pre" title="Code block">&lt;/&gt;</button>
         <button id="linkBtn" title="Link">🔗</button>
         <button id="tableBtn" title="Insert table">⊞</button>
-        <button id="imageBtn" title="Insert image">🖼</button>
+        <button id="imageBtn" title="Insert images">🖼</button>
+        <button id="ocrAddBtn" title="Add images + their text to this note">📷+</button>
         <button id="fileBtn" title="Attach file">📎</button>
       </div>
       <div id="editor" spellcheck="true"></div>
@@ -374,7 +381,9 @@ input,select,textarea{font:inherit;}
 <div id="modalWrap" class="hidden"><div id="modal"></div></div>
 <div id="toast"></div>
 <input type="file" id="enexFile" accept=".enex" multiple class="hidden">
-<input type="file" id="imgFile" accept="image/*" class="hidden">
+<input type="file" id="imgFile" accept="image/*" multiple class="hidden">
+<input type="file" id="ocrAddFile" accept="image/*" multiple class="hidden">
+<input type="file" id="ocrFile" accept="image/*" multiple class="hidden">
 <input type="file" id="anyFile" class="hidden">
 
 <script>
@@ -1869,6 +1878,91 @@ $("[data-view=trash]").onclick = () => {
   renderSidebar(); renderList(); closeSidebar();
 };
 $("#newNoteBtn").onclick = () => createNote().catch(e=>toast("Could not create note: "+e.message));
+
+/* ================================================================
+   NOTE FROM IMAGE — pick a screenshot/photo, OCR the text in the
+   browser (Tesseract.js), create a note with image + extracted text
+================================================================ */
+let tessLoading = null;
+function loadTesseract(){
+  if (window.Tesseract) return Promise.resolve();
+  if (tessLoading) return tessLoading;
+  tessLoading = new Promise((res, rej) => {
+    const sc = document.createElement("script");
+    sc.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    sc.onload = res;
+    sc.onerror = () => { tessLoading = null; rej(new Error("Could not load text-reading library (are you online?)")); };
+    document.head.appendChild(sc);
+  });
+  return tessLoading;
+}
+function ocrToMarkdown(text){
+  const lines = text.replace(/\r/g,"").split("\n").map(l => l.replace(/\s+$/,""));
+  const out = [];
+  for (let l of lines){
+    l = l.trim();
+    if (!l){ if (out.length && out[out.length-1] !== "") out.push(""); continue; }
+    l = l.replace(/^[•●▪◦·*]\s*/, "- ");
+    out.push(l);
+  }
+  // single newlines are soft in markdown: make each line its own line
+  return out.map((l,i) => (l && out[i+1] && !l.startsWith("- ") && !out[i+1].startsWith("- ")) ? l + "  " : l).join("\n").trim();
+}
+async function noteFromImage(files){
+  files = [].concat(files).filter(Boolean);
+  if (!files.length) return;
+  const many = files.length > 1;
+  try {
+    toast("Reading " + (many ? files.length + " images" : "image") + "… first time loads the text reader (~10s)", 5000);
+    await loadTesseract();
+    const ups = [], texts = [];
+    for (let i = 0; i < files.length; i++){
+      const tag = many ? ` (${i+1}/${files.length})` : "";
+      setSync("Reading text" + tag + "…");
+      const small = await compressImage(files[i]);
+      const result = await Tesseract.recognize(small, "eng", {
+        logger: m => { if (m.status === "recognizing text") setSync("Reading text" + tag + " " + Math.round((m.progress||0)*100) + "%"); }
+      });
+      texts.push((result.data.text || "").trim());
+      setSync("Uploading image" + tag + "…");
+      ups.push(await uploadAttachment(small, files[i].name));
+    }
+    setSync("Saving note…");
+    const body = texts.map(ocrToMarkdown).filter(Boolean).join("\n\n");
+    const firstLine = (body.split("\n").find(l => l.trim() && !l.startsWith("- ")) || "Image note")
+      .replace(/[#*_`>|\\]/g,"").trim().slice(0,80) || "Image note";
+    const recipes = state.notebooks.find(x => x.id.split("/").pop().toLowerCase() === "recipes");
+    const nb = (recipes && recipes.id) || state.currentNotebook || state.notebooks[0]?.id || "Inbox";
+    await ensureFolder(state.basePath + "/" + nb);
+    const name = newFilename(firstLine);
+    const path = state.basePath + "/" + nb + "/" + name;
+    const imgs = ups.map(u => `![${u.name}](gdrive:${u.path})`).join("\n\n");
+    const md = imgs + "\n\n" + (body || "_No text could be read from the image(s)._") + "\n";
+    const now = new Date().toISOString();
+    const n = { path, name, notebook: nb, title: firstLine, tags: ["screenshot"], created: now, updated: now, etag: null, preview: mkPreview(md) };
+    const res = await putContent(path, buildFrontmatter(n) + md, null);
+    n.etag = res.eTag;
+    state.bodies[path] = md;
+    state.notes.unshift(n);
+    renderSidebar(); renderList();
+    openNote(n, true);
+    toast(body ? "Note created from image" + (many ? "s" : "") + " ✓" : "Saved image — no text found");
+  } catch(e){
+    console.error(e); toast("Could not create note from image: " + e.message, 5000);
+  }
+  setSync("");
+}
+$("#ocrNoteBtn").onclick = () => $("#ocrFile").click();
+$("#ocrFile").addEventListener("change", async e => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (!files.length) return;
+  let combine = true;
+  if (files.length > 1)
+    combine = confirm(files.length + " images selected.\n\nOK = combine into ONE note (e.g. a recipe spanning several screenshots)\nCancel = make a SEPARATE note for each image");
+  if (combine) await noteFromImage(files);
+  else for (const f of files) await noteFromImage(f);
+});
+
 $("#refreshBtn").onclick = () => loadAll();
 
 // search
@@ -1992,8 +2086,40 @@ $("#linkBtn").onclick = e => {
 $("#imageBtn").onclick = () => $("#imgFile").click();
 $("#fileBtn").onclick = () => $("#anyFile").click();
 $("#imgFile").addEventListener("change", async e => {
-  if (e.target.files[0]) await insertImage(e.target.files[0]);
-  e.target.value = "";
+  const files = [...e.target.files]; e.target.value = "";
+  for (const f of files) await insertImage(f);
+});
+
+// add images (+ their OCR text) to the note that is currently open
+async function addImagesWithText(files){
+  if (!state.currentNote){ toast("Open a note first"); return; }
+  try {
+    toast("Reading " + files.length + " image" + (files.length>1?"s":"") + "…", 4000);
+    await loadTesseract();
+    for (let i = 0; i < files.length; i++){
+      const tag = files.length > 1 ? ` (${i+1}/${files.length})` : "";
+      setSync("Reading text" + tag + "…");
+      const small = await compressImage(files[i]);
+      const r = await Tesseract.recognize(small, "eng", {
+        logger: m => { if (m.status === "recognizing text") setSync("Reading text" + tag + " " + Math.round((m.progress||0)*100) + "%"); }
+      });
+      setSync("Uploading image" + tag + "…");
+      const { path } = await uploadAttachment(small, files[i].name);
+      const url = await attachmentUrl(path);
+      const txt = ocrToMarkdown((r.data.text || "").trim());
+      const html = `<p><img src="${url}" data-gpath="${esc(path)}" alt="${esc(files[i].name||"image")}"></p>` +
+        (txt ? txt.split(/\n{2,}/).map(par => "<p>" + esc(par).replace(/\n/g,"<br>") + "</p>").join("") : "");
+      Ed.insertHTML(html);
+      scheduleSave();
+    }
+    toast("Added to note ✓");
+  } catch(e){ console.error(e); toast("Could not add images: " + e.message, 5000); }
+  setSync("");
+}
+$("#ocrAddBtn").onclick = () => { if (!state.currentNote) return toast("Open a note first"); $("#ocrAddFile").click(); };
+$("#ocrAddFile").addEventListener("change", async e => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (files.length) await addImagesWithText(files);
 });
 $("#anyFile").addEventListener("change", async e => {
   if (e.target.files[0]) await insertFile(e.target.files[0]);
