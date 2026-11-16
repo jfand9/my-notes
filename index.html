@@ -471,6 +471,11 @@ async function startAuthFlow(){
   if (resp && resp.account) msalApp.setActiveAccount(resp.account);
   const tok = await acquireToken(false);
   if (tok){ showApp(); }
+  else if (msalApp.getAllAccounts().length && navigator.onLine){
+    // online but the silent token refresh failed (expired session) — re-authenticate instead of faking offline mode
+    try { await acquireToken(true); }
+    catch(e){ $("#loginHint").textContent = "Sign-in error: " + e.message; showScreen("login"); }
+  }
   else if (msalApp.getAllAccounts().length && localStorage.getItem("notes.index")){
     // signed in before but can't reach Microsoft (offline) — open with cached notes
     showApp();
@@ -1081,8 +1086,13 @@ async function loadAllFullScan(showProgress=true){
           if (raw !== null) state.bodies[n.path] = parseFrontmatter(raw).body;
         }
         renderSidebar(); renderList();
-        setSync("Offline");
-        toast("You're offline — showing saved notes. Edits will sync later.");
+        if (navigator.onLine){
+          setSync("Sync failed");
+          toast("Sync problem (showing saved notes): " + e.message, 8000);
+        } else {
+          setSync("Offline");
+          toast("You're offline — showing saved notes. Edits will sync later.");
+        }
         return;
       } catch(e2){ /* fall through */ }
     }
